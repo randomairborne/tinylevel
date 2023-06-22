@@ -39,7 +39,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         .expect("GUILD_ID required in the environment")
         .parse()
         .expect("GUILD_ID must be a valid discord snowflake");
-    let reward_level: i32 = std::env::var("REWARD_LEVEL")
+    let reward_level: u64 = std::env::var("REWARD_LEVEL")
         .expect("REWARD_LEVEL required in the environment")
         .parse()
         .expect("REWARD_LEVEL must be a valid i32");
@@ -139,7 +139,7 @@ async fn handle_message(mc: Message, state: AppState) {
         return;
     }
     #[allow(clippy::cast_sign_loss)]
-    if mee6::LevelInfo::new(xp as u64).level() > 5 {
+    if mee6::LevelInfo::new(xp as u64).level() > state.reward_level {
         if let Err(source) = state
             .http
             .add_guild_member_role(state.guild_id, mc.author.id, state.role_id)
@@ -157,7 +157,7 @@ pub struct AppState {
     pub xs: ExpiringSet,
     pub guild_id: Id<GuildMarker>,
     pub role_id: Id<RoleMarker>,
-    pub reward_level: i32,
+    pub reward_level: u64,
 }
 
 #[derive(Clone, Debug)]
