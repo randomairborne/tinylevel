@@ -57,9 +57,14 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         .connect_with(db_opts)
         .await
         .unwrap_or_else(|e| panic!("Failed to connect to {database_url}: {e}"));
-    tracing::info!("created shard");
+    sqlx::migrate!()
+        .run(&db)
+        .await
+        .expect("failed to run migrations");
+    info!("created shard");
     let http = Arc::new(Client::new(token));
     let xs = ExpiringSet::with_capacity(1_000);
+    let db_sd = db.clone();
     let state = AppState {
         http,
         db,
@@ -69,13 +74,15 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         reward_level,
     };
     let (shutdown_s, mut shutdown_r) = tokio::sync::oneshot::channel();
-    tokio::spawn(async {
+    debug!("registering shutdown handler");
+    tokio::spawn(async move {
         tokio::signal::ctrl_c()
             .await
             .expect("Failed to wait for ctrl+c!");
         shutdown_s
             .send(())
             .expect("Failed to shut down, is the shutdown handler running?");
+        db_sd.close().await;
     });
     loop {
         #[allow(clippy::redundant_pub_crate)]
@@ -83,10 +90,11 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             v = shard.next_event() => v,
             _ = &mut shutdown_r => break,
         };
+        trace!(?next, "got new event");
         let event = match next {
             Ok(event) => event,
             Err(source) => {
-                tracing::warn!(?source, "error receiving event");
+                error!(?source, "error receiving event");
                 if source.is_fatal() {
                     break;
                 }
@@ -99,7 +107,6 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     }
     let _ = shard.close(CloseFrame::NORMAL).await;
     info!("Shutting down!");
-    state.db.close().await;
     Ok(())
 }
 
@@ -108,9 +115,11 @@ async fn handle_message(mc: Message, state: AppState) {
         || !mc.guild_id.is_some_and(|v| v == state.guild_id)
         || state.xs.check_add(mc.author.id)
     {
+        debug!("skipped {}", mc.author.id);
         return;
     }
     let Some(member) = mc.member else {
+        warn!("discord did not send a member object");
         return;
     };
     #[allow(clippy::cast_possible_wrap)]
@@ -130,22 +139,27 @@ async fn handle_message(mc: Message, state: AppState) {
     {
         Ok(v) => v,
         Err(source) => {
-            error!(?source, "failed to add xp to db");
+            warn!(?source, "failed to add xp to db");
             return;
         }
     }
     .xp;
     if member.roles.contains(&state.role_id) {
+        debug!(
+            "skipping {} because they already have the role",
+            mc.author.id
+        );
         return;
     }
     #[allow(clippy::cast_sign_loss)]
-    if mee6::LevelInfo::new(xp as u64).level() > state.reward_level {
+    let current_level = mee6::LevelInfo::new(xp as u64).level();
+    if current_level >= state.reward_level {
         if let Err(source) = state
             .http
             .add_guild_member_role(state.guild_id, mc.author.id, state.role_id)
             .await
         {
-            error!(?source, "failed to add role to member");
+            warn!(?source, "failed to add role to member");
         }
     }
 }
@@ -183,7 +197,7 @@ impl ExpiringSet {
     /// Checks if the user is in the set. If not, adds them.
     #[must_use]
     pub fn check_add(&self, user: Id<UserMarker>) -> bool {
-        debug!("es: {self:?} ct: {:?}", Instant::now());
+        trace!("es: {self:?} ct: {:?}", Instant::now());
         if let Some(v) = self.set.write().get(&user) {
             if v.lt(&Instant::now()) {
                 self.set.write().remove(&user);
@@ -206,7 +220,7 @@ impl ExpiringSet {
         self.set
             .write()
             .insert(user, Instant::now() + Duration::from_secs(60));
-        debug!("es: {self:?} ct: {:?}", Instant::now());
+        trace!("es: {self:?} ct: {:?}", Instant::now());
         false
     }
 }
