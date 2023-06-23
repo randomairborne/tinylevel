@@ -70,8 +70,7 @@ jobs:
       - name: Build container
         uses: docker/build-push-action@v4
         with:
-          file: ${{ matrix.module }}/Dockerfile
           context: .
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/${{ matrix.module }}:latest
+          tags: ghcr.io/${{ env.REPO }}:latest
           platforms: linux/amd64
