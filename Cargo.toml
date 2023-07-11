@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-sqlx = { version = "0.7.0-alpha.3", features = ["runtime-tokio", "sqlite", "macros"] }
+sqlx = { version = "0.7.0", features = ["runtime-tokio", "sqlite", "macros"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 twilight-gateway = "0.15"
