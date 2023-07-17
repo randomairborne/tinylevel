@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO users\n        (user, active_minutes)\n        VALUES (?, 1)\n        ON CONFLICT DO UPDATE SET\n        active_minutes = active_minutes + 1\n        WHERE user = ?\n        RETURNING active_minutes",
+  "describe": {
+    "columns": [
+      {
+        "name": "active_minutes",
+        "ordinal": 0,
+        "type_info": "Int64"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "3c27b6f3979ef89f1b5dc6dfc06faf573846e9d3ccbe250918beef163226ff7a"
+}
