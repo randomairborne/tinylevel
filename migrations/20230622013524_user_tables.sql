@@ -1,5 +1,5 @@
 -- Add migration script here
-CREATE TABLE levels (
+CREATE TABLE users (
     user INTEGER PRIMARY KEY,
-    xp INTEGER NOT NULL
+    active_minutes INTEGER NOT NULL
 );

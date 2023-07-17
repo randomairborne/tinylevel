@@ -39,10 +39,10 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         .expect("GUILD_ID required in the environment")
         .parse()
         .expect("GUILD_ID must be a valid discord snowflake");
-    let reward_level: u64 = std::env::var("REWARD_LEVEL")
-        .expect("REWARD_LEVEL required in the environment")
+    let activity_minutes: i64 = std::env::var("ACTIVITY_MINUTES")
+        .expect("ACTIVITY_MINUTES required in the environment")
         .parse()
-        .expect("REWARD_LEVEL must be a valid i32");
+        .expect("ACTIVITY_MINUTES must be a valid i64");
     let database_url =
         std::env::var("DATABASE_URL").expect("DATABASE_URL required in the environment");
     let intents = Intents::GUILD_MESSAGES;
@@ -71,7 +71,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         xs,
         guild_id,
         role_id,
-        reward_level,
+        activity_minutes,
     };
     let (shutdown_s, mut shutdown_r) = tokio::sync::oneshot::channel();
     debug!("registering shutdown handler");
@@ -124,13 +124,14 @@ async fn handle_message(mc: Message, state: AppState) {
     };
     #[allow(clippy::cast_possible_wrap)]
     let author_id_i64 = mc.author.id.get() as i64;
-    let xp = match query!(
-        "INSERT INTO levels(user, xp)
-        VALUES (?, (abs(random()) % 10) + 15)
+    let active_minutes = match query!(
+        "INSERT INTO users
+        (user, active_minutes)
+        VALUES (?, 1)
         ON CONFLICT DO UPDATE SET
-        xp = xp + (abs(random()) % 10) + 15
+        active_minutes = active_minutes + 1
         WHERE user = ?
-        RETURNING xp",
+        RETURNING active_minutes",
         author_id_i64,
         author_id_i64
     )
@@ -139,11 +140,11 @@ async fn handle_message(mc: Message, state: AppState) {
     {
         Ok(v) => v,
         Err(source) => {
-            warn!(?source, "failed to add xp to db");
+            warn!(?source, "failed to add activity to db");
             return;
         }
     }
-    .xp;
+    .active_minutes;
     if member.roles.contains(&state.role_id) {
         debug!(
             "skipping {} because they already have the role",
@@ -151,9 +152,7 @@ async fn handle_message(mc: Message, state: AppState) {
         );
         return;
     }
-    #[allow(clippy::cast_sign_loss)]
-    let current_level = mee6::LevelInfo::new(xp as u64).level();
-    if current_level >= state.reward_level {
+    if active_minutes >= state.activity_minutes {
         if let Err(source) = state
             .http
             .add_guild_member_role(state.guild_id, mc.author.id, state.role_id)
@@ -171,7 +170,7 @@ pub struct AppState {
     pub xs: ExpiringSet,
     pub guild_id: Id<GuildMarker>,
     pub role_id: Id<RoleMarker>,
-    pub reward_level: u64,
+    pub activity_minutes: i64,
 }
 
 #[derive(Clone, Debug)]

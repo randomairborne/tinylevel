@@ -816,12 +816,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mee6"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0bac226cf08fc0cd984395114aa26511b6a112553ecbaf2ca1489077518611c"
-
-[[package]]
 name = "memchr"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1787,7 +1781,6 @@ version = "0.1.0"
 dependencies = [
  "ahash",
  "dotenvy",
- "mee6",
  "parking_lot",
  "sqlx",
  "tokio",
