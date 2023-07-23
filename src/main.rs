@@ -1,4 +1,4 @@
-#![warn(clippy::all, clippy::pedantic, clippy::nursery)]
+#![warn(clippy::all, clippy::pedantic)]
 
 use ahash::AHashMap;
 use parking_lot::RwLock;
@@ -75,10 +75,16 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     };
     let (shutdown_s, mut shutdown_r) = tokio::sync::oneshot::channel();
     debug!("registering shutdown handler");
+    #[cfg(not(unix))]
+    compile_error!("This application only supports Unix platforms. Consider WSL or docker.");
     tokio::spawn(async move {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("Failed to wait for ctrl+c!");
+        let mut sig =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
+        let ctrlc = tokio::signal::ctrl_c();
+        tokio::select! {
+            _v = sig.recv() => {},
+            _v = ctrlc => {}
+        };
         shutdown_s
             .send(())
             .expect("Failed to shut down, is the shutdown handler running?");
