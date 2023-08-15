@@ -13,6 +13,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+use tracing_subscriber::{prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt};
 use twilight_gateway::{CloseFrame, Event, Intents, Shard, ShardId};
 use twilight_http::Client;
 use twilight_model::{
@@ -29,7 +30,10 @@ extern crate tracing;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let _ = dotenvy::dotenv();
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer())
+        .with(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
     let token = std::env::var("DISCORD_TOKEN").expect("DISCORD_TOKEN required in the environment");
     let role_id: Id<RoleMarker> = std::env::var("ROLE_ID")
         .expect("ROLE_ID required in the environment")
