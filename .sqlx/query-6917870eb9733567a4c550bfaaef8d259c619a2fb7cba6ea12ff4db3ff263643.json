@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT user, active_minutes FROM users WHERE user = $1",
+  "describe": {
+    "columns": [
+      {
+        "name": "user",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "active_minutes",
+        "ordinal": 1,
+        "type_info": "Int64"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "6917870eb9733567a4c550bfaaef8d259c619a2fb7cba6ea12ff4db3ff263643"
+}
