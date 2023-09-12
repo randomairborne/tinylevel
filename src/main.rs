@@ -164,6 +164,7 @@ async fn event_loop(state: &AppState, mut shard: Shard, mut shutdown_r: Receiver
     let _ = shard.close(CloseFrame::NORMAL).await;
 }
 
+#[allow(clippy::unused_async)]
 async fn wrap_handle<F: IntoFuture<Output = Result<(), Error>> + Send + 'static>(fut: F)
 where
     <F as IntoFuture>::IntoFuture: Send,
