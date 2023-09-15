@@ -176,7 +176,7 @@ where
                 Error::DiscordApi(source) => warn!(?source),
                 Error::Sqlx(source) => error!(?source),
                 Error::NoResolvedData | Error::NoAuthorResolvedData | Error::NoInteractionData => {
-                    error!("{source}");
+                    error!(?source);
                 }
             }
         }

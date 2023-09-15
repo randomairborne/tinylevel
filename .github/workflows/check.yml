@@ -1,26 +1,29 @@
-name: PR check
+name: Cargo Check
 on:
   pull_request:
+    paths:
+      - src/**
+      - .sqlx/**
+      - .github/**
+      - Cargo.toml
+      - Cargo.lock
   workflow_dispatch:
   workflow_call:
 
-env:
-  SQLX_OFFLINE: true
-
 jobs:
-  check:
+  build:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out code into the proper directory
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install cargo
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
-      - name: Cache rust
+      - name: Cache Packages
         uses: Swatinem/rust-cache@v2
+        with:
+          key: "check"
 
       - name: Check formatting
         run: cargo fmt --check
