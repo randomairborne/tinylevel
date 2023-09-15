@@ -1,5 +1,6 @@
 FROM alpine
+ARG TARGETARCH
 
-COPY /executables/tinylevel /usr/bin/
+COPY /${TARGETARCH}-executables/tinylevel /usr/bin/
 
 ENTRYPOINT "/usr/bin/tinylevel"
