@@ -331,6 +331,7 @@ impl ExpiringSet {
         if let Some(v) = self.set.write().get(&user) {
             if v.lt(&Instant::now()) {
                 self.set.write().remove(&user);
+                return false;
             }
         }
         if self.set.read().contains_key(&user) {
