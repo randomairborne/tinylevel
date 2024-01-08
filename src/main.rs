@@ -8,13 +8,17 @@ use std::{
 };
 
 use ahash::AHashMap;
-use parking_lot::RwLock;
 use sqlx::{
     query,
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
     SqlitePool,
 };
-use tokio::sync::oneshot::Receiver;
+use tokio::sync::{
+    mpsc::{error::SendError as MpscSendError, Receiver as MpscReceiver, Sender as MpscSender},
+    oneshot::{
+        error::RecvError as OneshotRecvError, Receiver as OneshotReceiver, Sender as OneshotSender,
+    },
+};
 use tracing_subscriber::{prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt};
 use twilight_gateway::{CloseFrame, Event, Intents, Shard, ShardId};
 use twilight_http::Client;
@@ -73,7 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .expect("failed to run migrations");
     info!("created shard");
     let http = Arc::new(Client::new(token));
-    let xs = ExpiringSet::with_capacity(1_000);
+    let xs = Arc::new(ExpiringSet::new());
     let db_sd = db.clone();
     let my_id = http.current_user_application().await?.model().await?.id;
     let state = AppState {
@@ -106,16 +110,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .await?;
     let (shutdown_s, shutdown_r) = tokio::sync::oneshot::channel();
     debug!("registering shutdown handler");
-    #[cfg(not(unix))]
-    compile_error!("This application only supports Unix platforms. Consider WSL or docker.");
     tokio::spawn(async move {
-        let mut sig =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
-        let ctrlc = tokio::signal::ctrl_c();
-        tokio::select! {
-            _v = sig.recv() => {},
-            _v = ctrlc => {}
-        }
+        vss::shutdown_signal().await;
         shutdown_s
             .send(())
             .expect("Failed to shut down, is the shutdown handler running?");
@@ -126,7 +122,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
 }
 
-async fn event_loop(state: &AppState, mut shard: Shard, mut shutdown_r: Receiver<()>) {
+async fn event_loop(state: &AppState, mut shard: Shard, mut shutdown_r: OneshotReceiver<()>) {
     loop {
         #[allow(clippy::redundant_pub_crate)]
         let next = tokio::select! {
@@ -297,7 +293,7 @@ fn get_target(data: &CommandData) -> Result<Id<UserMarker>, Error> {
 async fn handle_message(mc: Message, state: AppState) -> Result<(), Error> {
     if mc.author.bot
         || !mc.guild_id.is_some_and(|v| v == state.guild_id)
-        || state.xs.check_add(mc.author.id)
+        || state.xs.check_add(mc.author.id).await?
     {
         debug!("skipped {}", mc.author.id);
         return Ok(());
@@ -376,7 +372,7 @@ fn id_to_db<T>(id: Id<T>) -> i64 {
 pub struct AppState {
     pub http: Arc<Client>,
     pub db: SqlitePool,
-    pub xs: ExpiringSet,
+    pub xs: Arc<ExpiringSet>,
     pub guild_id: Id<GuildMarker>,
     pub role_id: Id<RoleMarker>,
     pub activity_minutes: i64,
@@ -385,12 +381,16 @@ pub struct AppState {
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("twilight-validate error: {0}")]
+    #[error("twilight-validate error")]
     ValidateMessage(#[from] twilight_validate::message::MessageValidationError),
-    #[error("twilight-http error: {0}")]
+    #[error("twilight-http error")]
     DiscordApi(#[from] twilight_http::Error),
-    #[error("sqlx error: {0}")]
+    #[error("sqlx error")]
     Sqlx(#[from] sqlx::Error),
+    #[error("mpsc error")]
+    MpscSend(#[from] MpscSendError<ExpiryRequest>),
+    #[error("oneshot error")]
+    OneshotRecv(#[from] OneshotRecvError),
     #[error("Discord did not send the resolved data section of the interaction!")]
     NoResolvedData,
     #[error("Discord did not send a message author matching the target of the interaction!")]
@@ -407,10 +407,14 @@ pub enum Error {
     UnknownCommandType,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct ExpiringSet {
-    set: Arc<RwLock<ExpiringSetMap>>,
-    last_vac: Arc<RwLock<Instant>>,
+    requests: MpscSender<ExpiryRequest>,
+}
+
+pub struct ExpiryRequest {
+    pub returner: OneshotSender<bool>,
+    pub user: Id<UserMarker>,
 }
 
 type ExpiringSetMap = AHashMap<Id<UserMarker>, Instant>;
@@ -418,51 +422,51 @@ type ExpiringSetMap = AHashMap<Id<UserMarker>, Instant>;
 impl ExpiringSet {
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        let (tx, rx) = tokio::sync::mpsc::channel(128);
+        std::thread::spawn(move || Self::task(rx));
+        Self { requests: tx }
     }
 
-    #[must_use]
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self {
-            set: Arc::new(RwLock::new(AHashMap::with_capacity(capacity))),
-            last_vac: Arc::new(RwLock::new(Instant::now())),
+    fn task(mut rx: MpscReceiver<ExpiryRequest>) {
+        let mut last_vac = Instant::now();
+        let mut set: ExpiringSetMap = AHashMap::with_capacity(16);
+        while let Some(er) = rx.blocking_recv() {
+            let ExpiryRequest { returner, user } = er;
+            if let Some(v) = set.get(&user) {
+                if v.elapsed() > Duration::from_secs(60) {
+                    let _ = returner.send(true);
+                    continue;
+                }
+            }
+            if set.contains_key(&user) {
+                let _ = returner.send(true);
+                continue;
+            }
+            if last_vac.elapsed() > Duration::from_secs(60) {
+                set.retain(|_id, expiry| *expiry < Instant::now());
+                let shrink_target = set.len() + 1;
+                set.shrink_to(shrink_target);
+                last_vac = Instant::now();
+            }
+            set.insert(user, Instant::now());
+            let _ = returner.send(false);
         }
     }
 
     /// Checks if the user is in the set. If not, adds them.
-    #[must_use]
-    pub fn check_add(&self, user: Id<UserMarker>) -> bool {
-        trace!("es: {self:?} ct: {:?}", Instant::now());
-        if let Some(v) = self.set.write().get(&user) {
-            if v.lt(&Instant::now()) {
-                self.set.write().remove(&user);
-                return false;
-            }
-        }
-        if self.set.read().contains_key(&user) {
-            return true;
-        }
-        if self.set.read().len() > 1000
-            || self
-                .last_vac
-                .read()
-                .gt(&(Instant::now() + Duration::from_secs(20)))
-        {
-            self.set
-                .write()
-                .retain(|_id, expiry| *expiry < Instant::now());
-            self.set.write().shrink_to_fit();
-        }
-        self.set
-            .write()
-            .insert(user, Instant::now() + Duration::from_secs(60));
-        trace!("es: {self:?} ct: {:?}", Instant::now());
-        false
+    ///
+    /// # Errors
+    /// If the sender is misused, then this can error
+    pub async fn check_add(&self, user: Id<UserMarker>) -> Result<bool, Error> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let request = ExpiryRequest { returner: tx, user };
+        self.requests.send(request).await?;
+        Ok(rx.await?)
     }
 }
 
 impl Default for ExpiringSet {
     fn default() -> Self {
-        Self::with_capacity(16)
+        Self::new()
     }
 }
