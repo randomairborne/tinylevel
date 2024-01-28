@@ -63,6 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let db_opts = SqliteConnectOptions::from_str(&database_url)
         .expect("failed to parse DATABASE_URL")
         .create_if_missing(true)
+        .optimize_on_close(true, None)
         .auto_vacuum(sqlx::sqlite::SqliteAutoVacuum::Incremental)
         .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
     let db = SqlitePoolOptions::new()
