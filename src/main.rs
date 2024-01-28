@@ -53,12 +53,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .with(tracing_subscriber::fmt::layer())
         .with(tracing_subscriber::EnvFilter::from_default_env())
         .init();
-    let token = std::env::var("DISCORD_TOKEN").expect("DISCORD_TOKEN required in the environment");
+    let token = get_var("DATABASE_URL");
     let role_id: Id<RoleMarker> = parse_var("ROLE_ID");
     let guild_id: Id<GuildMarker> = parse_var("GUILD_ID");
     let activity_minutes: i64 = parse_var("ACTIVITY_MINUTES");
-    let database_url =
-        std::env::var("DATABASE_URL").expect("DATABASE_URL required in the environment");
+    let database_url = get_var("DATABASE_URL");
     let intents = Intents::GUILD_MESSAGES | Intents::GUILD_MODERATION;
     let shard = Shard::new(ShardId::ONE, token.clone(), intents);
     let db_opts = SqliteConnectOptions::from_str(&database_url)
@@ -350,13 +349,16 @@ async fn delete_user(target_i64: i64, db: &SqlitePool) -> Result<(), Error> {
     Ok(())
 }
 
+fn get_var(name: &str) -> String {
+    std::env::var(name).unwrap_or_else(|_| panic!("{name} required in the environment"))
+}
+
 fn parse_var<T>(name: &str) -> T
 where
     T: FromStr,
     T::Err: std::fmt::Debug,
 {
-    std::env::var(name)
-        .unwrap_or_else(|_| panic!("{name} required in the environment"))
+    get_var(name)
         .parse()
         .unwrap_or_else(|_| panic!("{name} must be a valid {}", std::any::type_name::<T>()))
 }
