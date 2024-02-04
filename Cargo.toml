@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 sqlx = { version = "0.7", features = ["runtime-tokio", "sqlite", "macros"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 twilight-util = { version = "0.15", features = ["builder"] }
 twilight-validate = "0.15"
@@ -16,4 +16,4 @@ dotenvy = "0.15"
 tracing = "0.1"
 thiserror = "1"
 ahash = "0.8"
-vss = "0.1.0"
+vss = "0.1"
