@@ -13,10 +13,14 @@ use sqlx::{
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
     SqlitePool,
 };
-use tokio::sync::{
-    mpsc::{error::SendError as MpscSendError, Receiver as MpscReceiver, Sender as MpscSender},
-    oneshot::{
-        error::RecvError as OneshotRecvError, Receiver as OneshotReceiver, Sender as OneshotSender,
+use tokio::{
+    select,
+    sync::{
+        mpsc::{error::SendError as MpscSendError, Receiver as MpscReceiver, Sender as MpscSender},
+        oneshot::{
+            error::RecvError as OneshotRecvError, Receiver as OneshotReceiver,
+            Sender as OneshotSender,
+        },
     },
 };
 use tracing_subscriber::{prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt};
@@ -124,8 +128,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
 async fn event_loop(state: &AppState, mut shard: Shard, mut shutdown_r: OneshotReceiver<()>) {
     loop {
-        #[allow(clippy::redundant_pub_crate)]
-        let next = tokio::select! {
+        let next = select! {
             v = shard.next_event() => v,
             _ = &mut shutdown_r => break,
         };
@@ -433,6 +436,8 @@ impl ExpiringSet {
     fn task(mut rx: MpscReceiver<ExpiryRequest>) {
         let mut last_vac = Instant::now();
         let mut set: ExpiringSetMap = AHashMap::with_capacity(16);
+        // This will return None when we're shutting down and there are no more senders.
+        // Maybe we should just use redis, or maybe even sqlite?
         while let Some(er) = rx.blocking_recv() {
             let ExpiryRequest { returner, user } = er;
             if let Some(v) = set.get(&user) {
