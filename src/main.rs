@@ -11,7 +11,7 @@ use std::{
 use ahash::AHashMap;
 use sqlx::{
     query,
-    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+    sqlite::{SqliteAutoVacuum, SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
     SqlitePool,
 };
 use tokio::{
@@ -44,6 +44,7 @@ use twilight_model::{
 use twilight_util::builder::{
     command::CommandBuilder, embed::EmbedBuilder, InteractionResponseDataBuilder,
 };
+use valk_utils::{get_var, parse_var};
 
 #[macro_use]
 extern crate tracing;
@@ -68,8 +69,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .expect("failed to parse DATABASE_URL")
         .create_if_missing(true)
         .optimize_on_close(true, None)
-        .auto_vacuum(sqlx::sqlite::SqliteAutoVacuum::Incremental)
-        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
+        .auto_vacuum(SqliteAutoVacuum::Incremental)
+        .journal_mode(SqliteJournalMode::Wal);
     let db = SqlitePoolOptions::new()
         .min_connections(5)
         .connect_with(db_opts)
@@ -402,20 +403,6 @@ async fn delete_user(target_i64: i64, db: &SqlitePool) -> Result<(), Error> {
         .execute(db)
         .await?;
     Ok(())
-}
-
-fn get_var(name: &str) -> String {
-    std::env::var(name).unwrap_or_else(|_| panic!("{name} required in the environment"))
-}
-
-fn parse_var<T>(name: &str) -> T
-where
-    T: FromStr,
-    T::Err: std::fmt::Debug,
-{
-    get_var(name)
-        .parse()
-        .unwrap_or_else(|_| panic!("{name} must be a valid {}", std::any::type_name::<T>()))
 }
 
 /// databases hate unsigned ints, so we cast our IDs to i64s
