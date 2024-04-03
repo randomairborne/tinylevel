@@ -4,6 +4,7 @@ use std::{
     future::IntoFuture,
     str::FromStr,
     sync::Arc,
+    thread::JoinHandle,
     time::{Duration, Instant},
 };
 
@@ -57,7 +58,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .with(tracing_subscriber::fmt::layer())
         .with(tracing_subscriber::EnvFilter::from_default_env())
         .init();
-    let token = get_var("DATABASE_URL");
+    let token = get_var("DISCORD_TOKEN");
     let role_id: Id<RoleMarker> = parse_var("ROLE_ID");
     let guild_id: Id<GuildMarker> = parse_var("GUILD_ID");
     let activity_minutes: i64 = parse_var("ACTIVITY_MINUTES");
@@ -135,6 +136,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("Shutting down!");
     // sqlite hates it when you shut down without closing the connection
     db_shutdown.close().await;
+    info!("Closed database, closing expiringset..");
+    Arc::try_unwrap(state.xs).unwrap().join().unwrap();
+    info!("Shutdown complete, bye!");
     Ok(())
 }
 
@@ -466,6 +470,7 @@ pub enum Error {
 #[derive(Debug)]
 pub struct ExpiringSet {
     requests: MpscSender<ExpiryRequest>,
+    handle: JoinHandle<()>,
 }
 
 pub struct ExpiryRequest {
@@ -484,8 +489,18 @@ impl ExpiringSet {
         let (tx, rx) = tokio::sync::mpsc::channel(128);
         // spawn a thread (not a Tokio task) which will wait for events sent on the channel
         // and fire a "existed" or "does not exist" bool back down the channel
-        std::thread::spawn(move || Self::task(rx));
-        Self { requests: tx }
+        let handle = std::thread::spawn(move || Self::task(rx));
+        Self {
+            requests: tx,
+            handle,
+        }
+    }
+
+    /// # Errors
+    /// When the thread has panicked, this will error
+    pub fn join(self) -> std::thread::Result<()> {
+        drop(self.requests);
+        self.handle.join()
     }
 
     fn vacuum(set: &mut ExpiringSetMap) {
