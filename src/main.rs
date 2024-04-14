@@ -1,14 +1,8 @@
 #![warn(clippy::all, clippy::pedantic)]
 
-use std::{
-    future::IntoFuture,
-    str::FromStr,
-    sync::Arc,
-    thread::JoinHandle,
-    time::{Duration, Instant},
-};
+use std::{future::IntoFuture, str::FromStr, sync::Arc, thread::JoinHandle, time::Duration};
 
-use ahash::AHashMap;
+use expiringmap::ExpiringSet;
 use sqlx::{
     query,
     sqlite::{SqliteAutoVacuum, SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
@@ -86,7 +80,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     info!("created shard");
     let http = Arc::new(Client::new(token));
-    let xs = Arc::new(ExpiringSet::new());
+    let xs = Arc::new(ExpiringSetActor::new());
     let db_shutdown = db.clone();
     let my_id = http.current_user_application().await?.model().await?.id;
     let state = AppState {
@@ -305,7 +299,7 @@ async fn reset_progress(
     Ok(ird)
 }
 
-/// helper function to take a CommandData that might be a user
+/// helper function to take a [`CommandData`] that might be a user
 /// or a message command and get the ID of the person we need to
 /// act upon
 fn get_target(data: &CommandData) -> Result<Id<UserMarker>, Error> {
@@ -335,14 +329,14 @@ async fn handle_message(mc: Message, state: AppState) -> Result<(), Error> {
     // the user still needs to wait to send another message
     let incorrect_guild = !mc.guild_id.is_some_and(|v| v == state.guild_id);
     let has_role = member.roles.contains(&state.role_id);
-    let time_remaining = state.xs.check_add(mc.author.id).await?;
-    if mc.author.bot || incorrect_guild || has_role || time_remaining.is_some() {
+    let on_cooldown = state.xs.on_cooldown(mc.author.id).await?;
+    if mc.author.bot || incorrect_guild || has_role || on_cooldown {
         debug!(
             author_id = mc.author.id.get(),
             bot = mc.author.bot,
             guild_id = mc.guild_id.map(Id::get),
             expected_guild_id = state.guild_id.get(),
-            time_remaining = time_remaining.as_ref().map(Duration::as_secs_f64),
+            on_cooldown,
             incorrect_guild,
             has_role,
             "skipped adding role to user",
@@ -417,7 +411,7 @@ fn id_to_db<T>(id: Id<T>) -> i64 {
 pub struct AppState {
     pub http: Arc<Client>,
     pub db: SqlitePool,
-    pub xs: Arc<ExpiringSet>,
+    pub xs: Arc<ExpiringSetActor>,
     pub guild_id: Id<GuildMarker>,
     pub role_id: Id<RoleMarker>,
     pub activity_minutes: i64,
@@ -452,23 +446,20 @@ pub enum Error {
     UnknownCommandType,
 }
 
-/// `ExpiringSet` is an actor which owns a HashMap of users who have sent things
+/// [`ExpiringSetActor`] is an actor which owns an [`ExpiringSet`] of users who have sent things
 /// recently.
 #[derive(Debug)]
-pub struct ExpiringSet {
+pub struct ExpiringSetActor {
     requests: MpscSender<ExpiryRequest>,
     handle: JoinHandle<()>,
 }
 
 pub struct ExpiryRequest {
-    pub returner: OneshotSender<Option<Duration>>,
+    pub returner: OneshotSender<bool>,
     pub user: Id<UserMarker>,
 }
 
-type ExpiringSetMap = AHashMap<Id<UserMarker>, Instant>;
-
-impl ExpiringSet {
-    const AUTO_VACUUM_INTERVAL: Duration = Duration::from_secs(600);
+impl ExpiringSetActor {
     const ONE_MINUTE: Duration = Duration::from_secs(60);
 
     #[must_use]
@@ -490,65 +481,29 @@ impl ExpiringSet {
         self.handle.join()
     }
 
-    fn vacuum(set: &mut ExpiringSetMap) {
-        // keep all the items in the set where it has been
-        // less than one minute since they were added
-        set.retain(|_id, expiry| expiry.elapsed() < Self::ONE_MINUTE);
-        // make the map as small as possible to decrease memory usage
-        let shrink_target = set.len() + 1;
-        set.shrink_to(shrink_target);
-    }
-
-    fn check_user(set: &mut ExpiringSetMap, user: Id<UserMarker>) -> Option<Duration> {
-        if let Some(added) = set.get(&user) {
-            // how long has it been since they sent their message?
-            let elapsed = added.elapsed();
-            if elapsed >= Self::ONE_MINUTE {
-                // enough time has elapsed, delete em
-                set.remove(&user);
-                None
-            } else {
-                // report remaining time
-                let remaining = Self::ONE_MINUTE.saturating_sub(elapsed);
-                Some(remaining)
-            }
-        } else {
-            // The user sent a message now
-            set.insert(user, Instant::now());
-            // got one minute left
-            Some(Self::ONE_MINUTE)
-        }
-    }
-
     fn task(mut rx: MpscReceiver<ExpiryRequest>) {
-        let mut last_vac = Instant::now();
-        let mut set: ExpiringSetMap = AHashMap::with_capacity(16);
+        let mut set = ExpiringSet::with_capacity(8);
         // This will return None when we're shutting down and there are no more senders.
-        // Maybe we should just use redis, or maybe even sqlite?
         // wait until we get a question, or are hung up on
         while let Some(er) = rx.blocking_recv() {
-            // if it's been AUTO_VACUUM_INTERVAL since we did a full clean-out,
-            // do one
-            if last_vac.elapsed() > Self::AUTO_VACUUM_INTERVAL {
-                Self::vacuum(&mut set);
-                // reset when we did this last
-                last_vac = Instant::now();
-            }
-
             let ExpiryRequest { returner, user } = er;
-            let remaining = Self::check_user(&mut set, user);
+            // if we have the user in the cache, they're on cooldown
+            let on_cooldown = set.get_meta(&user).is_some();
+            if !on_cooldown {
+                // they weren't on cooldown, so make them be
+                set.insert(user, Self::ONE_MINUTE);
+            }
             // report remaining duration, ignoring errors
-            let _ = returner.send(remaining);
+            let _ = returner.send(on_cooldown);
         }
     }
 
     /// Checks if the user is in the set. If not, adds them.
-    /// returns true if we had the user already, false if they were
-    /// added to our set
+    /// returns true if the user has sent a message
     ///
     /// # Errors
     /// If the sender is misused, then this can error
-    pub async fn check_add(&self, user: Id<UserMarker>) -> Result<Option<Duration>, Error> {
+    pub async fn on_cooldown(&self, user: Id<UserMarker>) -> Result<bool, Error> {
         // creates a channel to get the reply asynchronously
         let (tx, rx) = tokio::sync::oneshot::channel();
         let request = ExpiryRequest { returner: tx, user };
@@ -559,7 +514,7 @@ impl ExpiringSet {
     }
 }
 
-impl Default for ExpiringSet {
+impl Default for ExpiringSetActor {
     fn default() -> Self {
         Self::new()
     }
