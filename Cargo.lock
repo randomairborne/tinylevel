@@ -1760,7 +1760,6 @@ dependencies = [
 name = "tinylevel"
 version = "0.1.0"
 dependencies = [
- "dotenvy",
  "expiringmap",
  "sqlx",
  "thiserror",
