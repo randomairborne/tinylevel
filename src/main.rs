@@ -58,6 +58,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let activity_minutes: i64 = parse_var("ACTIVITY_MINUTES");
     let database_url = get_var("DATABASE_URL");
 
+    let (shutdown_s, shutdown_r) = tokio::sync::oneshot::channel();
+    debug!("registering shutdown handler");
+    tokio::spawn(async move {
+        // in the background, wait for shut down signal- then send it into
+        // the event loop
+        vss::shutdown_signal().await;
+        shutdown_s
+            .send(())
+            .expect("Failed to shut down, is the shutdown handler running?");
+    });
+
     let db_opts = SqliteConnectOptions::from_str(&database_url)
         .expect("failed to parse DATABASE_URL")
         .create_if_missing(true)
@@ -114,16 +125,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .set_guild_commands(state.guild_id, &commands)
         .await?;
 
-    let (shutdown_s, shutdown_r) = tokio::sync::oneshot::channel();
-    debug!("registering shutdown handler");
-    tokio::spawn(async move {
-        // in the background, wait for shut down signal- then send it into
-        // the event loop
-        vss::shutdown_signal().await;
-        shutdown_s
-            .send(())
-            .expect("Failed to shut down, is the shutdown handler running?");
-    });
     // run the loop until we get a send on shutdown_r
     event_loop(&state, shard, shutdown_r).await;
 
