@@ -48,7 +48,6 @@ const RESET_PROGRESS_NAME: &str = "Reset Role Progress";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let _ = dotenvy::dotenv();
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
         .with(tracing_subscriber::EnvFilter::from_default_env())
