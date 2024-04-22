@@ -339,7 +339,7 @@ async fn handle_message(mc: Message, state: AppState) -> Result<(), Error> {
             on_cooldown,
             incorrect_guild,
             has_role,
-            "skipped adding role to user",
+            "skipped adding XP to user",
         );
         return Ok(());
     }
@@ -366,6 +366,17 @@ async fn handle_message(mc: Message, state: AppState) -> Result<(), Error> {
             .http
             .add_guild_member_role(state.guild_id, mc.author.id, state.role_id)
             .await?;
+        trace!(
+            active = q.active_minutes,
+            user = mc.author.id.get(),
+            "adding role to user"
+        );
+    } else {
+        trace!(
+            active = q.active_minutes,
+            user = mc.author.id.get(),
+            "skipped adding role to user"
+        );
     }
     Ok(())
 }
