@@ -362,15 +362,19 @@ async fn handle_message(mc: Message, state: AppState) -> Result<(), Error> {
     .await?;
     // if they've been active long enough, give them the role
     if q.active_minutes >= state.activity_minutes {
-        state
-            .http
-            .add_guild_member_role(state.guild_id, mc.author.id, state.role_id)
-            .await?;
         trace!(
             active = q.active_minutes,
             user = mc.author.id.get(),
             "adding role to user"
         );
+        state
+            .http
+            .add_guild_member_role(state.guild_id, mc.author.id, state.role_id)
+            .await?;
+        // Once a user has the role, we don't care about them anymore.
+        // They already have the role, will lose it when kicked,
+        // we don't need to store their info
+        delete_user(mc.author.id, &state.db).await?;
     } else {
         trace!(
             active = q.active_minutes,
@@ -394,7 +398,7 @@ async fn handle_audit_log(
     if let Some(target) = audit_log.target_id {
         match audit_log.action_type {
             AuditLogEventType::MemberBanAdd | AuditLogEventType::MemberKick => {
-                delete_user(id_to_db(target), &state.db).await?;
+                delete_user(target.cast(), &state.db).await?;
             }
             _ => {}
         }
@@ -402,9 +406,10 @@ async fn handle_audit_log(
     Ok(())
 }
 
-async fn delete_user(target_i64: i64, db: &SqlitePool) -> Result<(), Error> {
+async fn delete_user(target: Id<UserMarker>, db: &SqlitePool) -> Result<(), Error> {
+    let id = id_to_db(target);
     // if what this function does defies your gaze, i have some concerns
-    query!("DELETE FROM users WHERE id = ?1", target_i64)
+    query!("DELETE FROM users WHERE id = ?1", id)
         .execute(db)
         .await?;
     Ok(())
