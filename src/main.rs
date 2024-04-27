@@ -76,8 +76,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // in the background, wait for shut down signal- then send it into
         // the event loop
         vss::shutdown_signal().await;
+        info!("Shutting down, closing discord connection...");
         // Shut down the sender, ignoring the error which occurs if the sender is closed already
         shutdown_sender.close(CloseFrame::NORMAL).ok();
+        info!("Discord connection closed, waiting for cleanup...");
     });
 
     info!("created shard");
@@ -113,7 +115,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // run the loop until the discord events dry up
     event_loop(&state, shard).await;
 
-    info!("Shutting down!");
     // sqlite hates it when you shut down without closing the connection
     db_shutdown.close().await;
     info!("Closed database, closing expiringset..");
@@ -166,7 +167,6 @@ async fn event_loop(state: &AppState, mut shard: Shard) {
             _ => {}
         }
     }
-    shard.close(CloseFrame::NORMAL);
 }
 
 /// Report errors for handler functions, and spawn them into background tasks
