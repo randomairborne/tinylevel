@@ -1,6 +1,15 @@
 #![warn(clippy::all, clippy::pedantic)]
 
-use std::{future::IntoFuture, str::FromStr, sync::Arc, thread::JoinHandle, time::Duration};
+use std::{
+    future::IntoFuture,
+    str::FromStr,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    thread::JoinHandle,
+    time::Duration,
+};
 
 use expiringmap::ExpiringSet;
 use sqlx::{
@@ -13,7 +22,10 @@ use tokio::sync::{
     oneshot::{error::RecvError as OneshotRecvError, Sender as OneshotSender},
 };
 use tracing_subscriber::{prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt};
-use twilight_gateway::{CloseFrame, Event, EventTypeFlags, Intents, Shard, ShardId, StreamExt};
+use twilight_gateway::{
+    error::ReceiveMessageErrorType, CloseFrame, Event, EventTypeFlags, Intents, Shard, ShardId,
+    StreamExt,
+};
 use twilight_http::Client;
 use twilight_model::{
     application::{
@@ -69,9 +81,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let intents = Intents::GUILD_MESSAGES | Intents::GUILD_MODERATION;
     let shard = Shard::new(ShardId::ONE, token.clone(), intents);
+    let shutdown = Arc::new(AtomicBool::new(false));
 
     debug!("registering shutdown handler");
     let shutdown_sender = shard.sender();
+    let shutdown_copy = Arc::clone(&shutdown);
     tokio::spawn(async move {
         // in the background, wait for shut down signal- then send it into
         // the event loop
@@ -79,6 +93,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         info!("Shutting down, closing discord connection...");
         // Shut down the sender, ignoring the error which occurs if the sender is closed already
         shutdown_sender.close(CloseFrame::NORMAL).ok();
+        shutdown_copy.store(true, Ordering::Relaxed);
         info!("Discord connection closed, waiting for cleanup...");
     });
 
@@ -95,6 +110,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         role_id,
         activity_minutes,
         my_id,
+        shut: shutdown,
     };
 
     let commands = [
@@ -133,6 +149,11 @@ async fn event_loop(state: &AppState, mut shard: Shard) {
         let event = match next {
             Ok(event) => event,
             Err(source) => {
+                if state.shut.load(Ordering::Relaxed)
+                    && matches!(source.kind(), ReceiveMessageErrorType::WebSocket)
+                {
+                    break;
+                }
                 error!(?source, "error receiving event");
                 continue;
             }
@@ -163,6 +184,11 @@ async fn event_loop(state: &AppState, mut shard: Shard) {
                     Ok(())
                 })
                 .await;
+            }
+            Event::GatewayClose(_close) => {
+                if state.shut.load(Ordering::Relaxed) {
+                    break;
+                }
             }
             _ => {}
         }
@@ -383,6 +409,7 @@ pub struct AppState {
     pub role_id: Id<RoleMarker>,
     pub activity_minutes: i64,
     pub my_id: Id<ApplicationMarker>,
+    pub shut: Arc<AtomicBool>,
 }
 
 #[derive(thiserror::Error, Debug)]
