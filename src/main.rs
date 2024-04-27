@@ -38,7 +38,6 @@ use valk_utils::{get_var, parse_var};
 extern crate tracing;
 
 const GET_PROGRESS_NAME: &str = "Get Role Progress";
-const RESET_PROGRESS_NAME: &str = "Reset Role Progress";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -101,12 +100,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             .default_member_permissions(Permissions::MANAGE_ROLES)
             .build(),
         CommandBuilder::new(GET_PROGRESS_NAME, "", CommandType::User)
-            .default_member_permissions(Permissions::MANAGE_ROLES)
-            .build(),
-        CommandBuilder::new(RESET_PROGRESS_NAME, "", CommandType::Message)
-            .default_member_permissions(Permissions::MANAGE_ROLES)
-            .build(),
-        CommandBuilder::new(RESET_PROGRESS_NAME, "", CommandType::User)
             .default_member_permissions(Permissions::MANAGE_ROLES)
             .build(),
     ];
@@ -226,7 +219,6 @@ async fn command(
     // command routing is done based on name, discord why
     match data.name.as_str() {
         GET_PROGRESS_NAME => get_progress(data.as_ref(), state).await,
-        RESET_PROGRESS_NAME => reset_progress(data.as_ref(), state).await,
         _ => Err(Error::UnknownCommand),
     }
 }
@@ -250,40 +242,6 @@ async fn get_progress(
         )
     };
 
-    let embed = EmbedBuilder::new().description(msg).build();
-    let ird = InteractionResponseDataBuilder::new()
-        .embeds([embed])
-        .flags(MessageFlags::EPHEMERAL)
-        .build();
-    Ok(ird)
-}
-
-async fn reset_progress(
-    data: &CommandData,
-    state: AppState,
-) -> Result<InteractionResponseData, Error> {
-    let id = get_target(data)?;
-    let id_i64 = id_to_db(id);
-    let db_deleted = query!("DELETE FROM users WHERE id = ?1", id_i64)
-        .execute(&state.db)
-        .await
-        .is_ok();
-    let guild_id = data.guild_id.ok_or(Error::NoGuildId)?;
-    let role_removed = state
-        .http
-        .remove_guild_member_role(guild_id, id, state.role_id)
-        .await
-        .is_ok();
-    let msg = match (db_deleted, role_removed) {
-        (true, true) => format!("user <@{id}> has been reset"),
-        (false, true) => {
-            format!("user <@{id}>'s role was removed, but their message count could not be reset")
-        }
-        (true, false) => {
-            format!("user <@{id}> has been reset, but their role could not be removed")
-        }
-        (false, false) => format!("user <@{id}> reset failed"),
-    };
     let embed = EmbedBuilder::new().description(msg).build();
     let ird = InteractionResponseDataBuilder::new()
         .embeds([embed])
