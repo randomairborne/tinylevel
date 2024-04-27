@@ -8,18 +8,12 @@ use sqlx::{
     sqlite::{SqliteAutoVacuum, SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
     SqlitePool,
 };
-use tokio::{
-    select,
-    sync::{
-        mpsc::{error::SendError as MpscSendError, Receiver as MpscReceiver, Sender as MpscSender},
-        oneshot::{
-            error::RecvError as OneshotRecvError, Receiver as OneshotReceiver,
-            Sender as OneshotSender,
-        },
-    },
+use tokio::sync::{
+    mpsc::{error::SendError as MpscSendError, Receiver as MpscReceiver, Sender as MpscSender},
+    oneshot::{error::RecvError as OneshotRecvError, Sender as OneshotSender},
 };
 use tracing_subscriber::{prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt};
-use twilight_gateway::{CloseFrame, Event, Intents, Shard, ShardId};
+use twilight_gateway::{CloseFrame, Event, EventTypeFlags, Intents, Shard, ShardId, StreamExt};
 use twilight_http::Client;
 use twilight_model::{
     application::{
@@ -58,17 +52,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let activity_minutes: i64 = parse_var("ACTIVITY_MINUTES");
     let database_url = get_var("DATABASE_URL");
 
-    let (shutdown_s, shutdown_r) = tokio::sync::oneshot::channel();
-    debug!("registering shutdown handler");
-    tokio::spawn(async move {
-        // in the background, wait for shut down signal- then send it into
-        // the event loop
-        vss::shutdown_signal().await;
-        shutdown_s
-            .send(())
-            .expect("Failed to shut down, is the shutdown handler running?");
-    });
-
     let db_opts = SqliteConnectOptions::from_str(&database_url)
         .expect("failed to parse DATABASE_URL")
         .create_if_missing(true)
@@ -87,6 +70,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let intents = Intents::GUILD_MESSAGES | Intents::GUILD_MODERATION;
     let shard = Shard::new(ShardId::ONE, token.clone(), intents);
+
+    debug!("registering shutdown handler");
+    let shutdown_sender = shard.sender();
+    tokio::spawn(async move {
+        // in the background, wait for shut down signal- then send it into
+        // the event loop
+        vss::shutdown_signal().await;
+        // Shut down the sender, ignoring the error which occurs if the sender is closed already
+        shutdown_sender.close(CloseFrame::NORMAL).ok();
+    });
 
     info!("created shard");
     let http = Arc::new(Client::new(token));
@@ -124,9 +117,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .interaction(state.my_id)
         .set_guild_commands(state.guild_id, &commands)
         .await?;
-
-    // run the loop until we get a send on shutdown_r
-    event_loop(&state, shard, shutdown_r).await;
+    // run the loop until the discord events dry up
+    event_loop(&state, shard).await;
 
     info!("Shutting down!");
     // sqlite hates it when you shut down without closing the connection
@@ -137,21 +129,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
 }
 
-async fn event_loop(state: &AppState, mut shard: Shard, mut shutdown_r: OneshotReceiver<()>) {
-    loop {
-        // while we wait for events, we should check if we got told to shut down
-        let next = select! {
-            v = shard.next_event() => v,
-            _ = &mut shutdown_r => break,
-        };
+async fn event_loop(state: &AppState, mut shard: Shard) {
+    let event_flags = EventTypeFlags::INTERACTION_CREATE
+        | EventTypeFlags::MESSAGE_CREATE
+        | EventTypeFlags::GUILD_CREATE
+        | EventTypeFlags::GUILD_AUDIT_LOG_ENTRY_CREATE;
+    while let Some(next) = shard.next_event(event_flags).await {
         trace!(?next, "got new event");
         let event = match next {
             Ok(event) => event,
             Err(source) => {
                 error!(?source, "error receiving event");
-                if source.is_fatal() {
-                    break;
-                }
                 continue;
             }
         };
@@ -162,7 +150,7 @@ async fn event_loop(state: &AppState, mut shard: Shard, mut shutdown_r: OneshotR
                 wrap_handle(handle_message(mc.0, state)).await;
             }
             Event::InteractionCreate(ic) => {
-                // this future was too big
+                // this future was too big. handle interactions
                 Box::pin(wrap_handle(handle_interaction(*ic, state))).await;
             }
             Event::GuildAuditLogEntryCreate(alec) => {
@@ -185,7 +173,7 @@ async fn event_loop(state: &AppState, mut shard: Shard, mut shutdown_r: OneshotR
             _ => {}
         }
     }
-    let _ = shard.close(CloseFrame::NORMAL).await;
+    shard.close(CloseFrame::NORMAL);
 }
 
 /// Report errors for handler functions, and spawn them into background tasks
@@ -253,10 +241,15 @@ async fn get_progress(
         .fetch_optional(&state.db)
         .await?
         .map_or(0, |v| v.active_minutes);
-    let msg = format!(
-        "user <@{id}> has been active for {active_minutes} minute{}",
-        if active_minutes == 1 { "" } else { "s" }
-    );
+    let msg = if active_minutes == 0 {
+        "This user has either not been active, or has reached the activity threshold.".to_string()
+    } else {
+        format!(
+            "user <@{id}> has been active for {active_minutes} minute{}",
+            if active_minutes == 1 { "" } else { "s" }
+        )
+    };
+
     let embed = EmbedBuilder::new().description(msg).build();
     let ird = InteractionResponseDataBuilder::new()
         .embeds([embed])
