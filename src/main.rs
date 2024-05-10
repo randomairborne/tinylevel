@@ -5,9 +5,8 @@ use std::{
     str::FromStr,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, PoisonError, RwLock,
     },
-    thread::JoinHandle,
     time::Duration,
 };
 
@@ -16,10 +15,6 @@ use sqlx::{
     query,
     sqlite::{SqliteAutoVacuum, SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
     SqlitePool,
-};
-use tokio::sync::{
-    mpsc::{error::SendError as MpscSendError, Receiver as MpscReceiver, Sender as MpscSender},
-    oneshot::{error::RecvError as OneshotRecvError, Sender as OneshotSender},
 };
 use tracing_subscriber::{prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt};
 use twilight_gateway::{
@@ -87,7 +82,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let shutdown_sender = shard.sender();
     let shutdown_copy = Arc::clone(&shutdown);
     tokio::spawn(async move {
-        // in the background, wait for shut down signal- then send it into
+        // in the background, wait for shut down signal. then send it into
         // the event loop
         vss::shutdown_signal().await;
         info!("Shutting down, closing discord connection...");
@@ -99,7 +94,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     info!("created shard");
     let http = Arc::new(Client::new(token));
-    let xs = Arc::new(ExpiringSetActor::new());
+    let xs = Arc::new(RwLock::new(ExpiringSet::new()));
     let db_shutdown = db.clone();
     let my_id = http.current_user_application().await?.model().await?.id;
     let state = AppState {
@@ -133,8 +128,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // sqlite hates it when you shut down without closing the connection
     db_shutdown.close().await;
-    info!("Closed database, closing expiringset..");
-    Arc::try_unwrap(state.xs).unwrap().join().unwrap();
     info!("Shutdown complete, bye!");
     Ok(())
 }
@@ -215,13 +208,12 @@ where
 
 async fn handle_interaction(ic: InteractionCreate, state: AppState) -> Result<(), Error> {
     // if we get an error, report it right in here
-    let mut interaction_response_data = command(&ic, state.clone()).await.unwrap_or_else(|err| {
+    let interaction_response_data = command(&ic, state.clone()).await.unwrap_or_else(|err| {
         InteractionResponseDataBuilder::new()
             .content(format!("Error: {err:?}"))
+            .flags(MessageFlags::EPHEMERAL)
             .build()
     });
-    // always be ephemeral
-    interaction_response_data.flags = Some(MessageFlags::EPHEMERAL);
     let response = InteractionResponse {
         data: Some(interaction_response_data),
         kind: InteractionResponseType::ChannelMessageWithSource,
@@ -297,6 +289,8 @@ fn get_target(data: &CommandData) -> Result<Id<UserMarker>, Error> {
     Ok(id)
 }
 
+const EXPIRY_DURATION: Duration = Duration::from_secs(60);
+
 async fn handle_message(mc: Message, state: AppState) -> Result<(), Error> {
     let member = mc.member.ok_or(Error::NoPartialMember)?;
     // immediately ignore this message if:
@@ -306,7 +300,7 @@ async fn handle_message(mc: Message, state: AppState) -> Result<(), Error> {
     // the user still needs to wait to send another message
     let incorrect_guild = !mc.guild_id.is_some_and(|v| v == state.guild_id);
     let has_role = member.roles.contains(&state.role_id);
-    let on_cooldown = state.xs.on_cooldown(mc.author.id).await?;
+    let on_cooldown = state.xs.read()?.contains(&mc.author.id);
     if mc.author.bot || incorrect_guild || has_role || on_cooldown {
         debug!(
             author_id = mc.author.id.get(),
@@ -337,6 +331,7 @@ async fn handle_message(mc: Message, state: AppState) -> Result<(), Error> {
     )
     .fetch_one(&state.db)
     .await?;
+    state.xs.write()?.insert(mc.author.id, EXPIRY_DURATION);
     // if they've been active long enough, give them the role
     if q.active_minutes >= state.activity_minutes {
         trace!(
@@ -404,7 +399,7 @@ fn id_to_db<T>(id: Id<T>) -> i64 {
 pub struct AppState {
     pub http: Arc<Client>,
     pub db: SqlitePool,
-    pub xs: Arc<ExpiringSetActor>,
+    pub xs: Arc<RwLock<ExpiringSet<Id<UserMarker>>>>,
     pub guild_id: Id<GuildMarker>,
     pub role_id: Id<RoleMarker>,
     pub activity_minutes: i64,
@@ -414,16 +409,12 @@ pub struct AppState {
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("twilight-validate error")]
-    ValidateMessage(#[from] twilight_validate::message::MessageValidationError),
     #[error("twilight-http error")]
     DiscordApi(#[from] twilight_http::Error),
     #[error("sqlx error")]
     Sqlx(#[from] sqlx::Error),
-    #[error("mpsc error")]
-    MpscSend(#[from] MpscSendError<ExpiryRequest>),
-    #[error("oneshot error")]
-    OneshotRecv(#[from] OneshotRecvError),
+    #[error("Lock poisoned")]
+    PoisonedLock,
     #[error("Discord did not send the resolved data section of the interaction!")]
     NoResolvedData,
     #[error("Discord did not send a message author matching the target of the interaction!")]
@@ -440,76 +431,8 @@ pub enum Error {
     UnknownCommandType,
 }
 
-/// [`ExpiringSetActor`] is an actor which owns an [`ExpiringSet`] of users who have sent things
-/// recently.
-#[derive(Debug)]
-pub struct ExpiringSetActor {
-    requests: MpscSender<ExpiryRequest>,
-    handle: JoinHandle<()>,
-}
-
-pub struct ExpiryRequest {
-    pub returner: OneshotSender<bool>,
-    pub user: Id<UserMarker>,
-}
-
-impl ExpiringSetActor {
-    const ONE_MINUTE: Duration = Duration::from_secs(60);
-
-    #[must_use]
-    pub fn new() -> Self {
-        let (tx, rx) = tokio::sync::mpsc::channel(128);
-        // spawn a thread (not a Tokio task) which will wait for events sent on the channel
-        // and fire a "existed" or "does not exist" bool back down the channel
-        let handle = std::thread::spawn(move || Self::task(rx));
-        Self {
-            requests: tx,
-            handle,
-        }
-    }
-
-    /// # Errors
-    /// When the thread has panicked, this will error
-    pub fn join(self) -> std::thread::Result<()> {
-        drop(self.requests);
-        self.handle.join()
-    }
-
-    fn task(mut rx: MpscReceiver<ExpiryRequest>) {
-        let mut set = ExpiringSet::with_capacity(8);
-        // This will return None when we're shutting down and there are no more senders.
-        // wait until we get a question, or are hung up on
-        while let Some(er) = rx.blocking_recv() {
-            let ExpiryRequest { returner, user } = er;
-            // if we have the user in the cache, they're on cooldown
-            let on_cooldown = set.get_meta(&user).is_some();
-            if !on_cooldown {
-                // they weren't on cooldown, so make them be
-                set.insert(user, Self::ONE_MINUTE);
-            }
-            // report remaining duration, ignoring errors
-            let _ = returner.send(on_cooldown);
-        }
-    }
-
-    /// Checks if the user is in the set. If not, adds them.
-    /// returns true if the user has sent a message
-    ///
-    /// # Errors
-    /// If the sender is misused, then this can error
-    pub async fn on_cooldown(&self, user: Id<UserMarker>) -> Result<bool, Error> {
-        // creates a channel to get the reply asynchronously
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let request = ExpiryRequest { returner: tx, user };
-        // send our request to the mpsc sender we have
-        self.requests.send(request).await?;
-        // wait for a response from our oneshot channel and return it
-        Ok(rx.await?)
-    }
-}
-
-impl Default for ExpiringSetActor {
-    fn default() -> Self {
-        Self::new()
+impl<T> From<PoisonError<T>> for Error {
+    fn from(_: PoisonError<T>) -> Self {
+        Self::PoisonedLock
     }
 }
