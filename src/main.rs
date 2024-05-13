@@ -390,9 +390,7 @@ async fn delete_user(target: Id<UserMarker>, db: &SqlitePool) -> Result<(), Erro
 /// databases hate unsigned ints, so we cast our IDs to i64s as well as hashing them
 #[inline]
 fn id_to_db<T>(id: Id<T>) -> i64 {
-    #[allow(clippy::cast_possible_wrap)]
-    let db_id = id.get() as i64;
-    db_id
+    i64::from_le_bytes(id.get().to_le_bytes())
 }
 
 #[derive(Clone)]
