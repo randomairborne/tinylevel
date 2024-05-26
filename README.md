@@ -1,5 +1,5 @@
 # tinylevel
 
-a stupidly simple mee6-compatible leveling bot
+a stupidly simple role-granting discord bot
 
-stores data in sqlite, only needs a discord token
+stores data in sqlite, only needs a discord token and other basic config

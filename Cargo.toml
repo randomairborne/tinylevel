@@ -5,15 +5,15 @@ edition = "2021"
 
 [dependencies]
 sqlx = { version = "0.7", features = ["runtime-tokio", "sqlite", "macros"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+twilight-util = { version = "0.16.0-rc.1", features = ["builder"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-twilight-util = { version = "0.15", features = ["builder"] }
-twilight-validate = "0.15"
-twilight-gateway = "0.15"
-twilight-model = "0.15"
-twilight-http = "0.15"
-parking_lot = "0.12"
-dotenvy = "0.15"
+twilight-validate = "0.16.0-rc.1"
+twilight-gateway = "0.16.0-rc.1"
+twilight-model = "0.16.0-rc.1"
+twilight-http = "0.16.0-rc.1"
+expiringmap = "0.1"
+valk-utils = "0.1"
 tracing = "0.1"
 thiserror = "1"
-ahash = "0.8"
+vss = "0.1"

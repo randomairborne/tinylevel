@@ -1,28 +1,36 @@
 #![warn(clippy::all, clippy::pedantic)]
 
-use ahash::AHashMap;
-use parking_lot::RwLock;
-use sqlx::{
-    query,
-    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
-    SqlitePool,
-};
 use std::{
     future::IntoFuture,
     str::FromStr,
-    sync::Arc,
-    time::{Duration, Instant},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, PoisonError, RwLock,
+    },
+    time::Duration,
 };
-use tokio::sync::oneshot::Receiver;
+
+use expiringmap::ExpiringSet;
+use sqlx::{
+    query,
+    sqlite::{SqliteAutoVacuum, SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
+    SqlitePool,
+};
 use tracing_subscriber::{prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt};
-use twilight_gateway::{CloseFrame, Event, Intents, Shard, ShardId};
+use twilight_gateway::{
+    error::ReceiveMessageErrorType, CloseFrame, Event, EventTypeFlags, Intents, Shard, ShardId,
+    StreamExt,
+};
 use twilight_http::Client;
 use twilight_model::{
-    application::interaction::InteractionData,
+    application::{
+        command::CommandType,
+        interaction::{application_command::CommandData, InteractionData},
+    },
     channel::{message::MessageFlags, Message},
-    gateway::payload::incoming::InteractionCreate,
-    guild::Permissions,
-    http::interaction::InteractionResponse,
+    gateway::payload::incoming::{GuildAuditLogEntryCreate, InteractionCreate},
+    guild::{audit_log::AuditLogEventType, Permissions},
+    http::interaction::{InteractionResponse, InteractionResponseData, InteractionResponseType},
     id::{
         marker::{ApplicationMarker, GuildMarker, RoleMarker, UserMarker},
         Id,
@@ -31,39 +39,31 @@ use twilight_model::{
 use twilight_util::builder::{
     command::CommandBuilder, embed::EmbedBuilder, InteractionResponseDataBuilder,
 };
+use valk_utils::{get_var, parse_var};
 
 #[macro_use]
 extern crate tracing;
 
+const GET_PROGRESS_NAME: &str = "Get Role Progress";
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let _ = dotenvy::dotenv();
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
         .with(tracing_subscriber::EnvFilter::from_default_env())
         .init();
-    let token = std::env::var("DISCORD_TOKEN").expect("DISCORD_TOKEN required in the environment");
-    let role_id: Id<RoleMarker> = std::env::var("ROLE_ID")
-        .expect("ROLE_ID required in the environment")
-        .parse()
-        .expect("ROLE_ID must be a valid discord snowflake");
-    let guild_id: Id<GuildMarker> = std::env::var("GUILD_ID")
-        .expect("GUILD_ID required in the environment")
-        .parse()
-        .expect("GUILD_ID must be a valid discord snowflake");
-    let activity_minutes: i64 = std::env::var("ACTIVITY_MINUTES")
-        .expect("ACTIVITY_MINUTES required in the environment")
-        .parse()
-        .expect("ACTIVITY_MINUTES must be a valid i64");
-    let database_url =
-        std::env::var("DATABASE_URL").expect("DATABASE_URL required in the environment");
-    let intents = Intents::GUILD_MESSAGES;
-    let shard = Shard::new(ShardId::ONE, token.clone(), intents);
+    let token = get_var("DISCORD_TOKEN");
+    let role_id: Id<RoleMarker> = parse_var("ROLE_ID");
+    let guild_id: Id<GuildMarker> = parse_var("GUILD_ID");
+    let activity_minutes: i64 = parse_var("ACTIVITY_MINUTES");
+    let database_url = get_var("DATABASE_URL");
+
     let db_opts = SqliteConnectOptions::from_str(&database_url)
         .expect("failed to parse DATABASE_URL")
         .create_if_missing(true)
-        .auto_vacuum(sqlx::sqlite::SqliteAutoVacuum::Incremental)
-        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
+        .optimize_on_close(true, None)
+        .auto_vacuum(SqliteAutoVacuum::Incremental)
+        .journal_mode(SqliteJournalMode::Wal);
     let db = SqlitePoolOptions::new()
         .min_connections(5)
         .connect_with(db_opts)
@@ -73,10 +73,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .run(&db)
         .await
         .expect("failed to run migrations");
+
+    let intents = Intents::GUILD_MESSAGES | Intents::GUILD_MODERATION;
+    let shard = Shard::new(ShardId::ONE, token.clone(), intents);
+    let shutdown = Arc::new(AtomicBool::new(false));
+
+    debug!("registering shutdown handler");
+    let shutdown_sender = shard.sender();
+    let shutdown_copy = Arc::clone(&shutdown);
+    tokio::spawn(async move {
+        // in the background, wait for shut down signal. then send it into
+        // the event loop
+        vss::shutdown_signal().await;
+        info!("Shutting down, closing discord connection...");
+        // Shut down the sender, ignoring the error which occurs if the sender is closed already
+        shutdown_sender.close(CloseFrame::NORMAL).ok();
+        shutdown_copy.store(true, Ordering::Relaxed);
+        info!("Discord connection closed, waiting for cleanup...");
+    });
+
     info!("created shard");
     let http = Arc::new(Client::new(token));
-    let xs = ExpiringSet::with_capacity(1_000);
-    let db_sd = db.clone();
+    let xs = Arc::new(RwLock::new(ExpiringSet::new()));
+    let db_shutdown = db.clone();
     let my_id = http.current_user_application().await?.model().await?.id;
     let state = AppState {
         http,
@@ -86,84 +105,90 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         role_id,
         activity_minutes,
         my_id,
+        shut: shutdown,
     };
+
     let commands = [
-        CommandBuilder::new(
-            "Get Role Progress",
-            "",
-            twilight_model::application::command::CommandType::Message,
-        )
-        .default_member_permissions(Permissions::MANAGE_ROLES)
-        .build(),
-        CommandBuilder::new(
-            "Get Role Progress",
-            "",
-            twilight_model::application::command::CommandType::User,
-        )
-        .default_member_permissions(Permissions::MANAGE_ROLES)
-        .build(),
+        CommandBuilder::new(GET_PROGRESS_NAME, "", CommandType::Message)
+            .default_member_permissions(Permissions::MANAGE_ROLES)
+            .build(),
+        CommandBuilder::new(GET_PROGRESS_NAME, "", CommandType::User)
+            .default_member_permissions(Permissions::MANAGE_ROLES)
+            .build(),
     ];
+
+    // idempotently set up commands
     state
         .http
         .interaction(state.my_id)
         .set_guild_commands(state.guild_id, &commands)
         .await?;
-    let (shutdown_s, shutdown_r) = tokio::sync::oneshot::channel();
-    debug!("registering shutdown handler");
-    #[cfg(not(unix))]
-    compile_error!("This application only supports Unix platforms. Consider WSL or docker.");
-    tokio::spawn(async move {
-        let mut sig =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
-        let ctrlc = tokio::signal::ctrl_c();
-        tokio::select! {
-            _v = sig.recv() => {},
-            _v = ctrlc => {}
-        };
-        shutdown_s
-            .send(())
-            .expect("Failed to shut down, is the shutdown handler running?");
-        db_sd.close().await;
-    });
-    event_loop(&state, shard, shutdown_r).await;
-    info!("Shutting down!");
+    // run the loop until the discord events dry up
+    event_loop(&state, shard).await;
+
+    // sqlite hates it when you shut down without closing the connection
+    db_shutdown.close().await;
+    info!("Shutdown complete, bye!");
     Ok(())
 }
 
-async fn event_loop(state: &AppState, mut shard: Shard, mut shutdown_r: Receiver<()>) {
-    loop {
-        #[allow(clippy::redundant_pub_crate)]
-        let next = tokio::select! {
-            v = shard.next_event() => v,
-            _ = &mut shutdown_r => break,
-        };
+async fn event_loop(state: &AppState, mut shard: Shard) {
+    let event_flags = EventTypeFlags::INTERACTION_CREATE
+        | EventTypeFlags::MESSAGE_CREATE
+        | EventTypeFlags::GUILD_CREATE
+        | EventTypeFlags::GUILD_AUDIT_LOG_ENTRY_CREATE;
+    while let Some(next) = shard.next_event(event_flags).await {
         trace!(?next, "got new event");
         let event = match next {
             Ok(event) => event,
             Err(source) => {
-                error!(?source, "error receiving event");
-                if source.is_fatal() {
+                if state.shut.load(Ordering::Relaxed)
+                    && matches!(source.kind(), ReceiveMessageErrorType::WebSocket)
+                {
                     break;
                 }
+                error!(?source, "error receiving event");
                 continue;
             }
         };
+        let state = state.clone();
         match event {
-            Event::ThreadCreate(thread) => {
-                tokio::spawn(state.http.join_thread(thread.id).into_future());
-            }
             Event::MessageCreate(mc) => {
-                wrap_handle(handle_message(mc.0, state.clone())).await;
+                // add the fact that the user sent a message to the db
+                wrap_handle(handle_message(mc.0, state)).await;
             }
             Event::InteractionCreate(ic) => {
-                wrap_handle(handle_interaction(*ic, state.clone())).await;
+                // this future was too big. handle interactions
+                Box::pin(wrap_handle(handle_interaction(*ic, state))).await;
+            }
+            Event::GuildAuditLogEntryCreate(alec) => {
+                // we listen to audit log events so that when people get kicked
+                // we can reset their leveling
+                wrap_handle(handle_audit_log(*alec, state)).await;
+            }
+            Event::GuildCreate(gc) => {
+                wrap_handle(async move {
+                    // if our guild ID doesn't match the guild
+                    // we just got, leave it
+                    if gc.id != state.guild_id {
+                        debug!("Leaving guild {} ({})", gc.name, gc.id);
+                        state.http.leave_guild(gc.id).await?;
+                    }
+                    Ok(())
+                })
+                .await;
+            }
+            Event::GatewayClose(_close) => {
+                if state.shut.load(Ordering::Relaxed) {
+                    break;
+                }
             }
             _ => {}
         }
     }
-    let _ = shard.close(CloseFrame::NORMAL).await;
 }
 
+/// Report errors for handler functions, and spawn them into background tasks
 #[allow(clippy::unused_async)]
 async fn wrap_handle<F: IntoFuture<Output = Result<(), Error>> + Send + 'static>(fut: F)
 where
@@ -172,10 +197,8 @@ where
     tokio::spawn(async {
         if let Err(source) = fut.await {
             match source {
-                Error::ValidateMessage(source) => error!(?source),
                 Error::DiscordApi(source) => warn!(?source),
-                Error::Sqlx(source) => error!(?source),
-                Error::NoResolvedData | Error::NoAuthorResolvedData | Error::NoInteractionData => {
+                _ => {
                     error!(?source);
                 }
             }
@@ -184,47 +207,18 @@ where
 }
 
 async fn handle_interaction(ic: InteractionCreate, state: AppState) -> Result<(), Error> {
-    let Some(InteractionData::ApplicationCommand(data)) = ic.data.as_ref() else {
-        return Err(Error::NoInteractionData)?;
-    };
-    let id_m = match data.kind {
-        twilight_model::application::command::CommandType::User => data.target_id.unwrap().cast(),
-        twilight_model::application::command::CommandType::Message => {
-            let Some(resolved) = data.resolved.as_ref() else {
-                return Err(Error::NoResolvedData);
-            };
-            resolved
-                .messages
-                .get(&data.target_id.unwrap().cast())
-                .ok_or(Error::NoAuthorResolvedData)?
-                .author
-                .id
-        }
-        _ => return Ok(()),
-    };
-    #[allow(clippy::cast_possible_wrap)]
-    let id_i64 = id_m.get() as i64;
-    let active_minutes = query!(
-        "SELECT user, active_minutes FROM users WHERE user = $1",
-        id_i64
-    )
-    .fetch_optional(&state.db)
-    .await?
-    .map_or(0, |v| v.active_minutes);
-    let embed = EmbedBuilder::new()
-        .description(format!(
-            "user <@{id_m}> has been active for {active_minutes} minute{}",
-            if active_minutes == 1 { "" } else { "s" }
-        ))
-        .build();
-    let irc = InteractionResponseDataBuilder::new()
-        .embeds([embed])
-        .flags(MessageFlags::EPHEMERAL)
-        .build();
+    // if we get an error, report it right in here
+    let interaction_response_data = command(&ic, state.clone()).await.unwrap_or_else(|err| {
+        InteractionResponseDataBuilder::new()
+            .content(format!("Error: {err:?}"))
+            .flags(MessageFlags::EPHEMERAL)
+            .build()
+    });
     let response = InteractionResponse {
-        data: Some(irc),
-        kind: twilight_model::http::interaction::InteractionResponseType::ChannelMessageWithSource,
+        data: Some(interaction_response_data),
+        kind: InteractionResponseType::ChannelMessageWithSource,
     };
+    // post our interaction back to the discord api with our ID, the interaction ID, and the interaction token
     state
         .http
         .interaction(ic.application_id)
@@ -233,131 +227,213 @@ async fn handle_interaction(ic: InteractionCreate, state: AppState) -> Result<()
     Ok(())
 }
 
-async fn handle_message(mc: Message, state: AppState) -> Result<(), Error> {
-    if mc.author.bot
-        || !mc.guild_id.is_some_and(|v| v == state.guild_id)
-        || state.xs.check_add(mc.author.id)
-    {
-        debug!("skipped {}", mc.author.id);
-        return Ok(());
-    }
-    let Some(member) = mc.member else {
-        warn!("discord did not send a member object");
-        return Ok(());
+async fn command(
+    ic: &InteractionCreate,
+    state: AppState,
+) -> Result<InteractionResponseData, Error> {
+    let Some(InteractionData::ApplicationCommand(data)) = ic.data.as_ref() else {
+        return Err(Error::NoInteractionData);
     };
-    #[allow(clippy::cast_possible_wrap)]
-    let author_id_i64 = mc.author.id.get() as i64;
-    let active_minutes = query!(
-        "INSERT INTO users
-        (user, active_minutes)
-        VALUES (?, 1)
-        ON CONFLICT DO UPDATE SET
-        active_minutes = active_minutes + 1
-        WHERE user = ?
-        RETURNING active_minutes",
-        author_id_i64,
-        author_id_i64
-    )
-    .fetch_one(&state.db)
-    .await?
-    .active_minutes;
-    if member.roles.contains(&state.role_id) {
+    // command routing is done based on name, discord why
+    match data.name.as_str() {
+        GET_PROGRESS_NAME => get_progress(data.as_ref(), state).await,
+        _ => Err(Error::UnknownCommand),
+    }
+}
+
+async fn get_progress(
+    data: &CommandData,
+    state: AppState,
+) -> Result<InteractionResponseData, Error> {
+    let id = get_target(data)?;
+    let id_i64 = id_to_db(id);
+    let active_minutes = query!("SELECT id, active_minutes FROM users WHERE id = ?1", id_i64)
+        .fetch_optional(&state.db)
+        .await?
+        .map_or(0, |v| v.active_minutes);
+    let msg = if active_minutes == 0 {
+        "This user has either not been active, or has reached the activity threshold.".to_string()
+    } else {
+        format!(
+            "user <@{id}> has been active for {active_minutes} minute{}",
+            if active_minutes == 1 { "" } else { "s" }
+        )
+    };
+
+    let embed = EmbedBuilder::new().description(msg).build();
+    let ird = InteractionResponseDataBuilder::new()
+        .embeds([embed])
+        .flags(MessageFlags::EPHEMERAL)
+        .build();
+    Ok(ird)
+}
+
+/// helper function to take a [`CommandData`] that might be a user
+/// or a message command and get the ID of the person we need to
+/// act upon
+fn get_target(data: &CommandData) -> Result<Id<UserMarker>, Error> {
+    let id = match data.kind {
+        CommandType::User => data.target_id.unwrap().cast(),
+        CommandType::Message => {
+            data.resolved
+                .as_ref()
+                .ok_or(Error::NoResolvedData)?
+                .messages
+                .get(&data.target_id.unwrap().cast())
+                .ok_or(Error::NoAuthorResolvedData)?
+                .author
+                .id
+        }
+        _ => return Err(Error::UnknownCommandType),
+    };
+    Ok(id)
+}
+
+const EXPIRY_DURATION: Duration = Duration::from_secs(60);
+
+async fn handle_message(mc: Message, state: AppState) -> Result<(), Error> {
+    let member = mc.member.ok_or(Error::NoPartialMember)?;
+    // immediately ignore this message if:
+    // the author is also a bot
+    // the message is not in our guild (not ((it's in a guild) and (it's in ours)))
+    // the user already has the role we'd be giving them
+    // the user still needs to wait to send another message
+    let incorrect_guild = !mc.guild_id.is_some_and(|v| v == state.guild_id);
+    let has_role = member.roles.contains(&state.role_id);
+    let on_cooldown = state.xs.read()?.contains(&mc.author.id);
+    if mc.author.bot || incorrect_guild || has_role || on_cooldown {
         debug!(
-            "skipping {} because they already have the role",
-            mc.author.id
+            author_id = mc.author.id.get(),
+            bot = mc.author.bot,
+            guild_id = mc.guild_id.map(Id::get),
+            expected_guild_id = state.guild_id.get(),
+            on_cooldown,
+            incorrect_guild,
+            has_role,
+            "skipped adding XP to user",
         );
         return Ok(());
     }
-    if active_minutes >= state.activity_minutes {
+    let db_id = id_to_db(mc.author.id);
+    // insert initial values
+    // if this user's values already exist
+    // add 1 to active_minutes for that user
+    // and return that value
+    let q = query!(
+        "INSERT INTO users
+        (id, active_minutes)
+        VALUES (?1, 1)
+        ON CONFLICT DO UPDATE SET
+        active_minutes = active_minutes + 1
+        WHERE id = ?1
+        RETURNING active_minutes",
+        db_id,
+    )
+    .fetch_one(&state.db)
+    .await?;
+    state.xs.write()?.insert(mc.author.id, EXPIRY_DURATION);
+    // if they've been active long enough, give them the role
+    if q.active_minutes >= state.activity_minutes {
+        trace!(
+            active = q.active_minutes,
+            user = mc.author.id.get(),
+            "adding role to user"
+        );
         state
             .http
             .add_guild_member_role(state.guild_id, mc.author.id, state.role_id)
             .await?;
+        // Once a user has the role, we don't care about them anymore.
+        // They already have the role, will lose it when kicked,
+        // we don't need to store their info
+        delete_user(mc.author.id, &state.db).await?;
+    } else {
+        trace!(
+            active = q.active_minutes,
+            user = mc.author.id.get(),
+            "skipped adding role to user"
+        );
     }
     Ok(())
+}
+
+async fn handle_audit_log(
+    audit_log: GuildAuditLogEntryCreate,
+    state: AppState,
+) -> Result<(), Error> {
+    trace!(?audit_log, "Got audit log event");
+    // if this event:
+    // has a target
+    // AND
+    // the action is Ban or Kick
+    // delete them
+    if let Some(target) = audit_log.target_id {
+        match audit_log.action_type {
+            AuditLogEventType::MemberBanAdd | AuditLogEventType::MemberKick => {
+                delete_user(target.cast(), &state.db).await?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+async fn delete_user(target: Id<UserMarker>, db: &SqlitePool) -> Result<(), Error> {
+    let id = id_to_db(target);
+    // if what this function does defies your gaze, i have some concerns
+    query!("DELETE FROM users WHERE id = ?1", id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+/// databases hate unsigned ints, so we cast our IDs to i64s
+#[inline]
+fn id_to_db<T>(id: Id<T>) -> i64 {
+    #[allow(clippy::cast_possible_wrap)]
+    {
+        id.get() as i64
+    }
 }
 
 #[derive(Clone)]
 pub struct AppState {
     pub http: Arc<Client>,
     pub db: SqlitePool,
-    pub xs: ExpiringSet,
+    pub xs: Arc<RwLock<ExpiringSet<Id<UserMarker>>>>,
     pub guild_id: Id<GuildMarker>,
     pub role_id: Id<RoleMarker>,
     pub activity_minutes: i64,
     pub my_id: Id<ApplicationMarker>,
+    pub shut: Arc<AtomicBool>,
 }
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("twilight-validate error: {0}")]
-    ValidateMessage(#[from] twilight_validate::message::MessageValidationError),
-    #[error("twilight-http error: {0}")]
+    #[error("twilight-http error")]
     DiscordApi(#[from] twilight_http::Error),
-    #[error("sqlx error: {0}")]
+    #[error("sqlx error")]
     Sqlx(#[from] sqlx::Error),
+    #[error("Lock poisoned")]
+    PoisonedLock,
     #[error("Discord did not send the resolved data section of the interaction!")]
     NoResolvedData,
     #[error("Discord did not send a message author matching the target of the interaction!")]
     NoAuthorResolvedData,
     #[error("Discord did not send the target of the interaction!")]
     NoInteractionData,
+    #[error("Discord did not send the partial member for this message!")]
+    NoPartialMember,
+    #[error("Discord did not send guild ID!")]
+    NoGuildId,
+    #[error("There is no command with this name")]
+    UnknownCommand,
+    #[error("There is a command with this name, but not with this type!")]
+    UnknownCommandType,
 }
 
-#[derive(Clone, Debug)]
-pub struct ExpiringSet {
-    set: Arc<RwLock<ExpiringSetMap>>,
-    last_vac: Arc<RwLock<Instant>>,
-}
-
-type ExpiringSetMap = AHashMap<Id<UserMarker>, Instant>;
-
-impl ExpiringSet {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-    #[must_use]
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self {
-            set: Arc::new(RwLock::new(AHashMap::with_capacity(capacity))),
-            last_vac: Arc::new(RwLock::new(Instant::now())),
-        }
-    }
-    /// Checks if the user is in the set. If not, adds them.
-    #[must_use]
-    pub fn check_add(&self, user: Id<UserMarker>) -> bool {
-        trace!("es: {self:?} ct: {:?}", Instant::now());
-        if let Some(v) = self.set.write().get(&user) {
-            if v.lt(&Instant::now()) {
-                self.set.write().remove(&user);
-                return false;
-            }
-        }
-        if self.set.read().contains_key(&user) {
-            return true;
-        }
-        if self.set.read().len() > 1000
-            || self
-                .last_vac
-                .read()
-                .gt(&(Instant::now() + Duration::from_secs(20)))
-        {
-            self.set
-                .write()
-                .retain(|_id, expiry| *expiry < Instant::now());
-            self.set.write().shrink_to_fit();
-        }
-        self.set
-            .write()
-            .insert(user, Instant::now() + Duration::from_secs(60));
-        trace!("es: {self:?} ct: {:?}", Instant::now());
-        false
-    }
-}
-
-impl Default for ExpiringSet {
-    fn default() -> Self {
-        Self::with_capacity(16)
+impl<T> From<PoisonError<T>> for Error {
+    fn from(_: PoisonError<T>) -> Self {
+        Self::PoisonedLock
     }
 }
