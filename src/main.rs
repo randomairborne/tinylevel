@@ -272,14 +272,15 @@ async fn get_progress(
 /// or a message command and get the ID of the person we need to
 /// act upon
 fn get_target(data: &CommandData) -> Result<Id<UserMarker>, Error> {
+    let target_id = data.target_id.ok_or(Error::NoTargetId)?;
     let id = match data.kind {
-        CommandType::User => data.target_id.unwrap().cast(),
+        CommandType::User => target_id.cast(),
         CommandType::Message => {
             data.resolved
                 .as_ref()
                 .ok_or(Error::NoResolvedData)?
                 .messages
-                .get(&data.target_id.unwrap().cast())
+                .get(&target_id.cast())
                 .ok_or(Error::NoAuthorResolvedData)?
                 .author
                 .id
@@ -430,6 +431,8 @@ pub enum Error {
     UnknownCommand,
     #[error("There is a command with this name, but not with this type!")]
     UnknownCommandType,
+    #[error("Discord did not send a target ID")]
+    NoTargetId,
 }
 
 impl<T> From<PoisonError<T>> for Error {
