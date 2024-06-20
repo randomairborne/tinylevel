@@ -1,0 +1,10 @@
+services:
+  bot:
+    build: .
+    image: ghcr.io/randomairborne/tinylevel:latest
+    volumes:
+      - ${PWD}/tinylevel.db:/tinylevel.db
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: sqlite:///tinylevel.db
