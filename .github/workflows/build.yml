@@ -54,7 +54,7 @@ jobs:
       - name: Upload digest
         uses: actions/upload-artifact@v4
         with:
-          name: digests-${{ maxtrix.platform.llvm }}
+          name: digests-${{ matrix.platform.llvm }}
           path: /tmp/digests/*
           if-no-files-found: error
           retention-days: 1
