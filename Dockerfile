@@ -1,15 +1,14 @@
 ARG LLVMTARGETARCH
-FROM ghcr.io/cross-rs/${LLVMTARGETARCH}-unknown-linux-musl:latest AS builder
 
-ENV LLVMTARGETARCH=$LLVMTARGETARCH
+FROM ghcr.io/randomairborne/cross-cargo-${LLVMTARGETARCH}:latest AS builder
+ARG LLVMTARGETARCH
 
 WORKDIR /build
 
-RUN cargo build --target ${LLVMTARGETARCH}-unknown-linux-musl
+RUN cargo build --release --target ${LLVMTARGETARCH}-unknown-linux-musl
 
 FROM scratch
-
-ENV LLVMTARGETARCH=$LLVMTARGETARCH
+ARG LLVMTARGETARCH
 
 COPY --from=builder /build/target/${LLVMTARGETARCH}-unknown-linux-musl/release/tinylevel /usr/bin/tinylevel
 
