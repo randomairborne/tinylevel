@@ -5,6 +5,8 @@ ARG LLVMTARGETARCH
 
 WORKDIR /build
 
+COPY . .
+
 RUN cargo build --release --target ${LLVMTARGETARCH}-unknown-linux-musl
 
 FROM scratch
