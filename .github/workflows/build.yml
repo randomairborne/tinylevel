@@ -45,7 +45,6 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          build-platforms:
           platforms: ${{ matrix.platform.docker }}
           build-args: |
             LLVMTARGETARCH=${{ matrix.platform.llvm }}
