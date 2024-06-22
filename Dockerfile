@@ -14,6 +14,4 @@ ARG LLVMTARGETARCH
 
 COPY --from=builder /build/target/${LLVMTARGETARCH}-unknown-linux-musl/release/tinylevel /usr/bin/tinylevel
 
-WORKDIR /
-
 ENTRYPOINT ["/usr/bin/tinylevel"]
