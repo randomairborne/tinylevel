@@ -1,10 +1,6 @@
-FROM alpine:latest
-ARG BUILDPLATFORM
 ARG LLVMTARGETARCH
-
-RUN echo ${BUILDPLATFORM}
-
 FROM --platform=${BUILDPLATFORM} ghcr.io/randomairborne/cross-cargo-${LLVMTARGETARCH}:latest AS builder
+
 ARG LLVMTARGETARCH
 
 WORKDIR /build
