@@ -16,4 +16,4 @@ COPY --from=builder /build/target/${LLVMTARGETARCH}-unknown-linux-musl/release/t
 
 WORKDIR /
 
-ENTRYPOINT "/usr/bin/tinylevel"
+ENTRYPOINT ["/usr/bin/tinylevel"]
