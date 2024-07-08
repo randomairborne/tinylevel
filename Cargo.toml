@@ -7,7 +7,7 @@ edition = "2021"
 sqlx = { version = "0.7", features = ["runtime-tokio", "sqlite", "macros"] }
 twilight-util = { version = "0.16.0-rc.1", features = ["builder"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["json"] }
 twilight-gateway = "0.16.0-rc.1"
 twilight-model = "0.16.0-rc.1"
 twilight-http = "0.16.0-rc.1"

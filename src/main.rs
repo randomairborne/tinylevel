@@ -16,6 +16,7 @@ use sqlx::{
     sqlite::{SqliteAutoVacuum, SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
     SqlitePool,
 };
+use tracing::Level;
 use tracing_subscriber::{prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt};
 use twilight_gateway::{
     error::ReceiveMessageErrorType, CloseFrame, Event, EventTypeFlags, Intents, Shard, ShardId,
@@ -48,9 +49,9 @@ const GET_PROGRESS_NAME: &str = "Get Role Progress";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer())
-        .with(tracing_subscriber::EnvFilter::from_default_env())
+    tracing_subscriber::fmt()
+        .with_max_level(Level::TRACE)
+        .json()
         .init();
     let token = get_var("DISCORD_TOKEN");
     let role_id: Id<RoleMarker> = parse_var("ROLE_ID");
