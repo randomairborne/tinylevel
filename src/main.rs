@@ -176,7 +176,7 @@ async fn event_loop(state: &AppState, mut shard: Shard) {
                     }
                     Ok(())
                 })
-                    .await;
+                .await;
             }
             Event::GatewayClose(_close) => {
                 if state.shut.load(Ordering::Relaxed) {
@@ -190,7 +190,7 @@ async fn event_loop(state: &AppState, mut shard: Shard) {
 
 /// Report errors for handler functions, and spawn them into background tasks
 #[allow(clippy::unused_async)]
-async fn wrap_handle<F: IntoFuture<Output=Result<(), Error>> + Send + 'static>(fut: F)
+async fn wrap_handle<F: IntoFuture<Output = Result<(), Error>> + Send + 'static>(fut: F)
 where
     <F as IntoFuture>::IntoFuture: Send,
 {
@@ -330,8 +330,8 @@ async fn handle_message(mc: Message, state: AppState) -> Result<(), Error> {
         RETURNING active_minutes",
         db_id,
     )
-        .fetch_one(&state.db)
-        .await?;
+    .fetch_one(&state.db)
+    .await?;
     state.xs.write()?.insert(mc.author.id, EXPIRY_DURATION);
     // if they've been active long enough, give them the role
     if q.active_minutes >= state.activity_minutes {
