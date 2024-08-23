@@ -162,7 +162,7 @@ async fn event_loop(state: &AppState, mut shard: Shard) {
 
 /// Report errors for handler functions, and spawn them into background tasks
 #[allow(clippy::unused_async)]
-async fn wrap_handle<F: IntoFuture<Output=Result<(), Error>> + Send + 'static>(fut: F)
+async fn wrap_handle<F: IntoFuture<Output = Result<(), Error>> + Send + 'static>(fut: F)
 where
     <F as IntoFuture>::IntoFuture: Send,
 {
@@ -306,9 +306,9 @@ async fn handle_message(mc: Message, state: AppState) -> Result<(), Error> {
         db_timestamp,
         state.cooldown_seconds
     )
-        .fetch_optional(&state.db)
-        .await?
-        .map(|v| v.active_minutes);
+    .fetch_optional(&state.db)
+    .await?
+    .map(|v| v.active_minutes);
 
     let Some(active_minutes) = active_minutes else {
         debug!(id = ?mc.author.id, "Not giving role to user- on cooldown");
