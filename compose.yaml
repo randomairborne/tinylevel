@@ -1,6 +1,5 @@
 services:
   bot:
-    build: .
     image: ghcr.io/randomairborne/tinylevel:latest
     pull_policy: always
     volumes:
