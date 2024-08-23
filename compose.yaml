@@ -3,8 +3,8 @@ services:
     build: .
     image: ghcr.io/randomairborne/tinylevel:latest
     volumes:
-      - ${PWD}/tinylevel.db:/tinylevel.db
+      - ${PWD}/data/:/data/
     env_file:
       - .env
     environment:
-      DATABASE_URL: sqlite:///tinylevel.db
+      DATABASE_URL: sqlite:///data/tinylevel.db
