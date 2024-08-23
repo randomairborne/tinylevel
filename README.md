@@ -1,16 +1,17 @@
 # tinylevel
 
-a stupidly simple role-granting discord bot
+A stupidly simple role-granting discord bot.
 
-stores data in sqlite, only needs a discord token and other basic config.
+Stores data in sqlite, only needs a discord token and other basic config.
 
-required environment:
+environment variables:
 
 ```dotenv
 DISCORD_TOKEN=<your bot token>
 ROLE_ID=<your activity role id>
 GUILD_ID=<your guild id>
 ACTIVITY_MINUTES=60
+COOLDOWN_SECONDS=60
 ```
 
 run with:
