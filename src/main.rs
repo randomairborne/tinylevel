@@ -14,8 +14,12 @@ use sqlx::{
     sqlite::{SqliteAutoVacuum, SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
     SqlitePool,
 };
+use tokio_util::task::TaskTracker;
 use tracing::level_filters::LevelFilter;
-use twilight_gateway::{CloseFrame, Event, EventTypeFlags, Intents, Shard, ShardId, StreamExt};
+use twilight_gateway::{
+    error::ReceiveMessageErrorType, CloseFrame, Event, EventTypeFlags, Intents, Shard, ShardId,
+    StreamExt,
+};
 use twilight_http::Client;
 use twilight_model::{
     application::{
@@ -131,51 +135,71 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
 async fn event_loop(state: &AppState, mut shard: Shard) {
     let event_flags = EventTypeFlags::INTERACTION_CREATE | EventTypeFlags::MESSAGE_CREATE;
+    // The task tracker allows us to ensure all the current messages are handled before we shut down
+    let task_tracker = TaskTracker::new();
+    let runtime = tokio::runtime::Handle::current();
+
     while let Some(next) = shard.next_event(event_flags).await {
         trace!(?next, "got new event");
         let event = match next {
             Ok(event) => event,
             Err(source) => {
-                error!(?source, "error receiving event");
-                continue;
+                if matches!(source.kind(), ReceiveMessageErrorType::WebSocket)
+                    && state.shutdown.load(Ordering::Acquire)
+                {
+                    // If we have a gateway error and are shutting down
+                    // Generate a fake gateway close
+                    Event::GatewayClose(None)
+                } else {
+                    error!(?source, "error receiving event");
+                    continue;
+                }
             }
         };
         let state = state.clone();
         match event {
             Event::MessageCreate(mc) => {
                 // add the fact that the user sent a message to the db
-                wrap_handle(handle_message(mc.0, state)).await;
+                wrap_handle(&runtime, &task_tracker, handle_message(mc.0, state));
             }
             Event::InteractionCreate(ic) => {
                 // handle commands
-                wrap_handle(handle_interaction(*ic, state)).await;
+                wrap_handle(&runtime, &task_tracker, handle_interaction(*ic, state));
             }
             Event::GatewayClose(_close) => {
-                if state.shutdown.load(Ordering::Relaxed) {
+                if state.shutdown.load(Ordering::Acquire) {
+                    task_tracker.close();
                     break;
                 }
             }
             _ => {}
         }
     }
+    info!("Event loop shutting down. Waiting for all background tasks to complete...");
+    task_tracker.wait().await;
 }
 
 /// Report errors for handler functions, and spawn them into background tasks
-#[allow(clippy::unused_async)]
-async fn wrap_handle<F: IntoFuture<Output = Result<(), Error>> + Send + 'static>(fut: F)
-where
+fn wrap_handle<F: IntoFuture<Output=Result<(), Error>> + Send + 'static>(
+    rt: &tokio::runtime::Handle,
+    tt: &TaskTracker,
+    fut: F,
+) where
     <F as IntoFuture>::IntoFuture: Send,
 {
-    tokio::spawn(async {
-        if let Err(source) = fut.await {
-            match source {
-                Error::DiscordApi(source) => warn!(?source),
-                _ => {
-                    error!(?source);
+    tt.spawn_on(
+        async {
+            if let Err(source) = fut.await {
+                match source {
+                    Error::DiscordApi(source) => warn!(?source),
+                    _ => {
+                        error!(?source);
+                    }
                 }
             }
-        }
-    });
+        },
+        rt,
+    );
 }
 
 async fn handle_interaction(ic: InteractionCreate, state: AppState) -> Result<(), Error> {
@@ -306,9 +330,9 @@ async fn handle_message(mc: Message, state: AppState) -> Result<(), Error> {
         db_timestamp,
         state.cooldown_seconds
     )
-    .fetch_optional(&state.db)
-    .await?
-    .map(|v| v.active_minutes);
+        .fetch_optional(&state.db)
+        .await?
+        .map(|v| v.active_minutes);
 
     let Some(active_minutes) = active_minutes else {
         debug!(id = ?mc.author.id, "Not giving role to user- on cooldown");
