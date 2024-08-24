@@ -44,6 +44,7 @@ use valk_utils::{get_var, parse_var, parse_var_or};
 extern crate tracing;
 
 const GET_PROGRESS_NAME: &str = "Get Role Progress";
+const RESET_PROGRESS_NAME: &str = "Reset Role Progress";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -115,6 +116,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         CommandBuilder::new(GET_PROGRESS_NAME, "", CommandType::User)
             .default_member_permissions(Permissions::MODERATE_MEMBERS)
             .build(),
+        CommandBuilder::new(RESET_PROGRESS_NAME, "", CommandType::Message)
+            .default_member_permissions(Permissions::MODERATE_MEMBERS)
+            .build(),
+        CommandBuilder::new(RESET_PROGRESS_NAME, "", CommandType::User)
+            .default_member_permissions(Permissions::MODERATE_MEMBERS)
+            .build(),
     ];
 
     // idempotently set up commands
@@ -180,7 +187,7 @@ async fn event_loop(state: &AppState, mut shard: Shard) {
 }
 
 /// Report errors for handler functions, and spawn them into background tasks
-fn wrap_handle<F: IntoFuture<Output = Result<(), Error>> + Send + 'static>(
+fn wrap_handle<F: IntoFuture<Output=Result<(), Error>> + Send + 'static>(
     rt: &tokio::runtime::Handle,
     tt: &TaskTracker,
     fut: F,
@@ -235,6 +242,7 @@ async fn command(
     // command routing is done based on name, discord why
     match data.name.as_str() {
         GET_PROGRESS_NAME => get_progress(data.as_ref(), state).await,
+        RESET_PROGRESS_NAME => reset_progress(data.as_ref(), state).await,
         _ => Err(Error::UnknownCommand),
     }
 }
@@ -256,6 +264,28 @@ async fn get_progress(
             "User <@{id}> has been active for {active_minutes} minute{}.",
             if active_minutes == 1 { "" } else { "s" }
         )
+    };
+
+    let embed = EmbedBuilder::new().description(msg).build();
+    let ird = InteractionResponseDataBuilder::new()
+        .embeds([embed])
+        .flags(MessageFlags::EPHEMERAL)
+        .build();
+    Ok(ird)
+}
+
+async fn reset_progress(
+    data: &CommandData,
+    state: AppState,
+) -> Result<InteractionResponseData, Error> {
+    let id = get_target(data)?;
+    let q = query!("DELETE FROM users WHERE id = ?1", id_to_db(id))
+        .execute(&state.db)
+        .await?;
+    let msg = if q.rows_affected() == 0 {
+        "This user had no progress."
+    } else {
+        "User progress reset."
     };
 
     let embed = EmbedBuilder::new().description(msg).build();
@@ -330,9 +360,9 @@ async fn handle_message(mc: Message, state: AppState) -> Result<(), Error> {
         db_timestamp,
         state.cooldown_seconds
     )
-    .fetch_optional(&state.db)
-    .await?
-    .map(|v| v.active_minutes);
+        .fetch_optional(&state.db)
+        .await?
+        .map(|v| v.active_minutes);
 
     let Some(active_minutes) = active_minutes else {
         debug!(id = ?mc.author.id, "Not giving role to user- on cooldown");
