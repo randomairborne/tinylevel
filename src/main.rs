@@ -279,7 +279,8 @@ async fn reset_progress(
     state: AppState,
 ) -> Result<InteractionResponseData, Error> {
     let id = get_target(data)?;
-    let q = query!("DELETE FROM users WHERE id = ?1", id_to_db(id))
+    let id_i64 = id_to_db(id);
+    let q = query!("DELETE FROM users WHERE id = ?1", id_i64)
         .execute(&state.db)
         .await?;
     let msg = if q.rows_affected() == 0 {
