@@ -23,8 +23,11 @@ use twilight_gateway::{
 use twilight_http::Client;
 use twilight_model::{
     application::{
-        command::CommandType,
-        interaction::{application_command::CommandData, InteractionData},
+        command::{CommandOption, CommandOptionType, CommandType},
+        interaction::{
+            application_command::{CommandData, CommandOptionValue},
+            InteractionData,
+        },
     },
     channel::{message::MessageFlags, Message},
     gateway::payload::incoming::InteractionCreate,
@@ -43,8 +46,13 @@ use valk_utils::{get_var, parse_var, parse_var_or};
 #[macro_use]
 extern crate tracing;
 
-const GET_PROGRESS_NAME: &str = "Get Role Progress";
-const RESET_PROGRESS_NAME: &str = "Reset Role Progress";
+const GET_PROGRESS_NAME_CTX: &str = "Get Role Progress";
+const RESET_PROGRESS_NAME_CTX: &str = "Reset Role Progress";
+
+const GET_PROGRESS_NAME_SLASH: &str = "progress";
+const RESET_PROGRESS_NAME_SLASH: &str = "reset";
+
+const SLASH_ARG_NAME: &str = "name";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -109,19 +117,58 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         shutdown,
     };
 
+    let target_argument = CommandOption {
+        autocomplete: None,
+        channel_types: None,
+        choices: None,
+        description: "Which user to target".to_string(),
+        description_localizations: None,
+        kind: CommandOptionType::User,
+        max_length: None,
+        max_value: None,
+        min_length: None,
+        min_value: None,
+        name: SLASH_ARG_NAME.to_string(),
+        name_localizations: None,
+        options: None,
+        required: Some(true),
+    };
+
     let commands = [
-        CommandBuilder::new(GET_PROGRESS_NAME, "", CommandType::Message)
+        CommandBuilder::new(GET_PROGRESS_NAME_CTX, "", CommandType::Message)
             .default_member_permissions(Permissions::MODERATE_MEMBERS)
+            .dm_permission(false)
             .build(),
-        CommandBuilder::new(GET_PROGRESS_NAME, "", CommandType::User)
+        CommandBuilder::new(GET_PROGRESS_NAME_CTX, "", CommandType::User)
             .default_member_permissions(Permissions::MODERATE_MEMBERS)
+            .dm_permission(false)
             .build(),
-        CommandBuilder::new(RESET_PROGRESS_NAME, "", CommandType::Message)
+        CommandBuilder::new(RESET_PROGRESS_NAME_CTX, "", CommandType::Message)
             .default_member_permissions(Permissions::MODERATE_MEMBERS)
+            .dm_permission(false)
             .build(),
-        CommandBuilder::new(RESET_PROGRESS_NAME, "", CommandType::User)
+        CommandBuilder::new(RESET_PROGRESS_NAME_CTX, "", CommandType::User)
             .default_member_permissions(Permissions::MODERATE_MEMBERS)
+            .dm_permission(false)
             .build(),
+        CommandBuilder::new(
+            GET_PROGRESS_NAME_SLASH,
+            "Get a user's leveling progress.",
+            CommandType::ChatInput,
+        )
+        .default_member_permissions(Permissions::MODERATE_MEMBERS)
+        .dm_permission(false)
+        .option(target_argument.clone())
+        .build(),
+        CommandBuilder::new(
+            RESET_PROGRESS_NAME_SLASH,
+            "Reset a user's leveling progress.",
+            CommandType::ChatInput,
+        )
+        .default_member_permissions(Permissions::MODERATE_MEMBERS)
+        .dm_permission(false)
+        .option(target_argument)
+        .build(),
     ];
 
     // idempotently set up commands
@@ -194,9 +241,15 @@ fn wrap_handle<F: IntoFuture<Output = Result<(), Error>> + Send + 'static>(
 ) where
     <F as IntoFuture>::IntoFuture: Send,
 {
+    // Tell the task tracker to track this new task
+    // and create it on `rt`
     tt.spawn_on(
+        // Can wait in the background
         async {
+            // if the function errors, report it.
             if let Err(source) = fut.await {
+                // Discord API errors are warnings, all others
+                // are... errors.
                 match source {
                     Error::DiscordApi(source) => warn!(?source),
                     _ => {
@@ -213,11 +266,12 @@ async fn handle_interaction(ic: InteractionCreate, state: AppState) -> Result<()
     // if we get an error, report it right in here
     let mut interaction_response_data = command(&ic, state.clone()).await.unwrap_or_else(|err| {
         InteractionResponseDataBuilder::new()
-            .content(format!("Error: {err:?}"))
+            .content(format!("Error: {err}"))
             .flags(MessageFlags::EPHEMERAL)
             .build()
     });
 
+    // we NEVER EVER EVER want to send a public response. Ever.
     interaction_response_data.flags = Some(MessageFlags::EPHEMERAL);
     let response = InteractionResponse {
         data: Some(interaction_response_data),
@@ -241,8 +295,10 @@ async fn command(
     };
     // command routing is done based on name, discord why
     match data.name.as_str() {
-        GET_PROGRESS_NAME => get_progress(data.as_ref(), state).await,
-        RESET_PROGRESS_NAME => reset_progress(data.as_ref(), state).await,
+        GET_PROGRESS_NAME_CTX => get_progress(data.as_ref(), state).await,
+        RESET_PROGRESS_NAME_CTX => reset_progress(data.as_ref(), state).await,
+        GET_PROGRESS_NAME_SLASH => get_progress(data.as_ref(), state).await,
+        RESET_PROGRESS_NAME_SLASH => reset_progress(data.as_ref(), state).await,
         _ => Err(Error::UnknownCommand),
     }
 }
@@ -258,11 +314,12 @@ async fn get_progress(
         .await?
         .map_or(0, |v| v.active_minutes);
     let msg = if active_minutes == 0 {
-        "This user has no progress.".to_string()
+        format!("<@{id}> has no progress.")
     } else {
+        let active_minutes_pluralizer = if active_minutes == 1 { "" } else { "s" };
         format!(
-            "User <@{id}> has been active for {active_minutes} minute{}.",
-            if active_minutes == 1 { "" } else { "s" }
+            "User <@{id}> has been active for {} minute{} out of {} required to receive the role.",
+            active_minutes, active_minutes_pluralizer, state.activity_minutes,
         )
     };
 
@@ -284,9 +341,9 @@ async fn reset_progress(
         .execute(&state.db)
         .await?;
     let msg = if q.rows_affected() == 0 {
-        "This user had no progress."
+        format!("<@{id}> had no previous progress.")
     } else {
-        "User progress reset."
+        format!("<@{id}>'s progress has been reset.")
     };
 
     let embed = EmbedBuilder::new().description(msg).build();
@@ -301,10 +358,10 @@ async fn reset_progress(
 /// or a message command and get the ID of the person we need to
 /// act upon
 fn get_target(data: &CommandData) -> Result<Id<UserMarker>, Error> {
-    let target_id = data.target_id.ok_or(Error::NoTargetId)?;
     let id = match data.kind {
-        CommandType::User => target_id.cast(),
+        CommandType::User => data.target_id.ok_or(Error::NoTargetId)?.cast(),
         CommandType::Message => {
+            let target_id = data.target_id.ok_or(Error::NoTargetId)?;
             data.resolved
                 .as_ref()
                 .ok_or(Error::NoResolvedData)?
@@ -313,6 +370,17 @@ fn get_target(data: &CommandData) -> Result<Id<UserMarker>, Error> {
                 .ok_or(Error::NoAuthorResolvedData)?
                 .author
                 .id
+        }
+        CommandType::ChatInput => {
+            let option = data
+                .options
+                .iter()
+                .find(|v| v.name == SLASH_ARG_NAME)
+                .ok_or(Error::NoChatInputOption)?;
+            let CommandOptionValue::User(uid) = option.value else {
+                return Err(Error::WrongChatInputOptionValue);
+            };
+            uid
         }
         _ => return Err(Error::UnknownCommandType),
     };
@@ -425,12 +493,16 @@ pub enum Error {
     NoInteractionData,
     #[error("Discord did not send the partial member for this message!")]
     NoPartialMember,
-    #[error("Discord did not send guild ID!")]
+    #[error("Discord did not send guild ID")]
     NoGuildId,
     #[error("There is no command with this name")]
     UnknownCommand,
-    #[error("There is a command with this name, but not with this type!")]
+    #[error("There is a command with this name, but not with this type")]
     UnknownCommandType,
     #[error("Discord did not send a target ID")]
     NoTargetId,
+    #[error("Required argument was not found")]
+    NoChatInputOption,
+    #[error("Required argument was of wrong type")]
+    WrongChatInputOptionValue,
 }
