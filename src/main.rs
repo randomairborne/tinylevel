@@ -299,10 +299,10 @@ async fn command(
     };
     // command routing is done based on name, discord why
     match data.name.as_str() {
-        GET_PROGRESS_NAME_CTX => get_progress(data.as_ref(), state).await,
-        RESET_PROGRESS_NAME_CTX => reset_progress(data.as_ref(), state).await,
-        GET_PROGRESS_NAME_SLASH => get_progress(data.as_ref(), state).await,
-        RESET_PROGRESS_NAME_SLASH => reset_progress(data.as_ref(), state).await,
+        GET_PROGRESS_NAME_CTX | GET_PROGRESS_NAME_SLASH => get_progress(data.as_ref(), state).await,
+        RESET_PROGRESS_NAME_CTX | RESET_PROGRESS_NAME_SLASH => {
+            reset_progress(data.as_ref(), state).await
+        }
         _ => Err(Error::UnknownCommand),
     }
 }
