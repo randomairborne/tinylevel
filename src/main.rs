@@ -23,7 +23,7 @@ use twilight_gateway::{
 use twilight_http::Client;
 use twilight_model::{
     application::{
-        command::{CommandOption, CommandOptionType, CommandType},
+        command::{Command, CommandOption, CommandOptionType, CommandType},
         interaction::{
             application_command::{CommandData, CommandOptionValue},
             InteractionData,
@@ -117,59 +117,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         shutdown,
     };
 
-    let target_argument = CommandOption {
-        autocomplete: None,
-        channel_types: None,
-        choices: None,
-        description: "Which user to target".to_string(),
-        description_localizations: None,
-        kind: CommandOptionType::User,
-        max_length: None,
-        max_value: None,
-        min_length: None,
-        min_value: None,
-        name: SLASH_ARG_NAME.to_string(),
-        name_localizations: None,
-        options: None,
-        required: Some(true),
-    };
-
-    let commands = [
-        CommandBuilder::new(GET_PROGRESS_NAME_CTX, "", CommandType::Message)
-            .default_member_permissions(Permissions::MODERATE_MEMBERS)
-            .dm_permission(false)
-            .build(),
-        CommandBuilder::new(GET_PROGRESS_NAME_CTX, "", CommandType::User)
-            .default_member_permissions(Permissions::MODERATE_MEMBERS)
-            .dm_permission(false)
-            .build(),
-        CommandBuilder::new(RESET_PROGRESS_NAME_CTX, "", CommandType::Message)
-            .default_member_permissions(Permissions::MODERATE_MEMBERS)
-            .dm_permission(false)
-            .build(),
-        CommandBuilder::new(RESET_PROGRESS_NAME_CTX, "", CommandType::User)
-            .default_member_permissions(Permissions::MODERATE_MEMBERS)
-            .dm_permission(false)
-            .build(),
-        CommandBuilder::new(
-            GET_PROGRESS_NAME_SLASH,
-            "Get a user's leveling progress.",
-            CommandType::ChatInput,
-        )
-        .default_member_permissions(Permissions::MODERATE_MEMBERS)
-        .dm_permission(false)
-        .option(target_argument.clone())
-        .build(),
-        CommandBuilder::new(
-            RESET_PROGRESS_NAME_SLASH,
-            "Reset a user's leveling progress.",
-            CommandType::ChatInput,
-        )
-        .default_member_permissions(Permissions::MODERATE_MEMBERS)
-        .dm_permission(false)
-        .option(target_argument)
-        .build(),
-    ];
+    let commands = get_commands();
 
     // idempotently set up commands
     state
@@ -260,6 +208,62 @@ fn wrap_handle<F: IntoFuture<Output = Result<(), Error>> + Send + 'static>(
         },
         rt,
     );
+}
+
+fn get_commands() -> [Command; 6] {
+    let target_argument = CommandOption {
+        autocomplete: None,
+        channel_types: None,
+        choices: None,
+        description: "Which user to target".to_string(),
+        description_localizations: None,
+        kind: CommandOptionType::User,
+        max_length: None,
+        max_value: None,
+        min_length: None,
+        min_value: None,
+        name: SLASH_ARG_NAME.to_string(),
+        name_localizations: None,
+        options: None,
+        required: Some(true),
+    };
+
+    [
+        CommandBuilder::new(GET_PROGRESS_NAME_CTX, "", CommandType::Message)
+            .default_member_permissions(Permissions::MODERATE_MEMBERS)
+            .dm_permission(false)
+            .build(),
+        CommandBuilder::new(GET_PROGRESS_NAME_CTX, "", CommandType::User)
+            .default_member_permissions(Permissions::MODERATE_MEMBERS)
+            .dm_permission(false)
+            .build(),
+        CommandBuilder::new(RESET_PROGRESS_NAME_CTX, "", CommandType::Message)
+            .default_member_permissions(Permissions::MODERATE_MEMBERS)
+            .dm_permission(false)
+            .build(),
+        CommandBuilder::new(RESET_PROGRESS_NAME_CTX, "", CommandType::User)
+            .default_member_permissions(Permissions::MODERATE_MEMBERS)
+            .dm_permission(false)
+            .build(),
+        CommandBuilder::new(
+            GET_PROGRESS_NAME_SLASH,
+            "Get a user's leveling progress.",
+            CommandType::ChatInput,
+        )
+        .default_member_permissions(Permissions::MODERATE_MEMBERS)
+        .dm_permission(false)
+        .option(target_argument.clone())
+        .build(),
+        CommandBuilder::new(
+            RESET_PROGRESS_NAME_SLASH,
+            "Reset a user's leveling progress.",
+            CommandType::ChatInput,
+        )
+        .default_member_permissions(Permissions::MODERATE_MEMBERS)
+        .dm_permission(false)
+        .option(target_argument)
+        .build(),
+    ]
 }
 
 async fn handle_interaction(ic: InteractionCreate, state: AppState) -> Result<(), Error> {
