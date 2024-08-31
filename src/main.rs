@@ -210,7 +210,7 @@ fn wrap_handle<F: IntoFuture<Output = Result<(), Error>> + Send + 'static>(
     );
 }
 
-fn get_commands() -> [Command; 6] {
+fn get_commands() -> Vec<Command> {
     let target_argument = CommandOption {
         autocomplete: None,
         channel_types: None,
@@ -264,6 +264,7 @@ fn get_commands() -> [Command; 6] {
         .option(target_argument)
         .build(),
     ]
+    .to_vec()
 }
 
 async fn handle_interaction(ic: InteractionCreate, state: AppState) -> Result<(), Error> {
