@@ -282,6 +282,7 @@ async fn handle_interaction(ic: InteractionCreate, state: AppState) -> Result<()
         data: Some(interaction_response_data),
         kind: InteractionResponseType::ChannelMessageWithSource,
     };
+
     // post our interaction back to the discord api with our ID, the interaction ID, and the interaction token
     state
         .http
