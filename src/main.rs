@@ -320,7 +320,7 @@ async fn get_progress(
         .await?
         .map_or(0, |v| v.active_minutes);
     let msg = if active_minutes == 0 {
-        format!("<@{id}> has no progress.")
+        format!("<@{id}> has no activity.")
     } else {
         let active_minutes_pluralizer = if active_minutes == 1 { "" } else { "s" };
         format!(
