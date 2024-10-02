@@ -55,7 +55,7 @@ const RESET_PROGRESS_NAME_SLASH: &str = "reset";
 const SLASH_ARG_NAME: &str = "name";
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn main() {
     let log_level: LevelFilter = parse_var_or("LOG_LEVEL", LevelFilter::INFO);
     tracing_subscriber::fmt()
         .with_max_level(log_level)
@@ -105,7 +105,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("created shard");
     let http = Arc::new(Client::new(token));
     let db_shutdown = db.clone();
-    let my_id = http.current_user_application().await?.model().await?.id;
+    let me = http
+        .current_user_application()
+        .await
+        .unwrap()
+        .model()
+        .await
+        .unwrap();
     let state = AppState {
         http,
         db,
@@ -113,7 +119,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         role_id,
         activity_minutes,
         cooldown_seconds,
-        my_id,
+        app_id: me.id,
+        bot_id: me.bot.expect("No associated bot").id,
         shutdown,
     };
 
@@ -122,9 +129,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // idempotently set up commands
     state
         .http
-        .interaction(state.my_id)
+        .interaction(state.app_id)
         .set_guild_commands(state.guild_id, &commands)
-        .await?;
+        .await
+        .expect("Failed to set guild commands for bot");
 
     // run the loop until the discord events dry up
     event_loop(&state, shard).await;
@@ -132,7 +140,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // sqlite hates it when you shut down without closing the connection
     db_shutdown.close().await;
     info!("Shutdown complete, bye!");
-    Ok(())
 }
 
 async fn event_loop(state: &AppState, mut shard: Shard) {
@@ -475,7 +482,8 @@ pub struct AppState {
     pub role_id: Id<RoleMarker>,
     pub activity_minutes: i64,
     pub cooldown_seconds: i64,
-    pub my_id: Id<ApplicationMarker>,
+    pub app_id: Id<ApplicationMarker>,
+    pub bot_id: Id<UserMarker>,
     pub shutdown: Arc<AtomicBool>,
 }
 
