@@ -108,10 +108,10 @@ async fn main() {
     let me = http
         .current_user_application()
         .await
-        .unwrap()
+        .expect("Failed to fetch own ID")
         .model()
         .await
-        .unwrap();
+        .expect("Failed to deserialize own ID");
     let state = AppState {
         http,
         db,
