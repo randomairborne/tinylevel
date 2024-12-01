@@ -14,5 +14,5 @@ tokio-util = { version = "0.7", features = ["rt"] }
 twilight-model = "0.16.0-rc.1"
 valk-utils = "0.1"
 tracing = "0.1"
-thiserror = "1"
+thiserror = "2"
 vss = "0.1"
