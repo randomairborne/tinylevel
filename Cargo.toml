@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-twilight-gateway = { version = "0.16.0-rc.1", default-features = false, features = ["rustls-webpki-roots", "zlib-stock"] }
+twilight-gateway = { version = "0.16.0", default-features = false, features = ["rustls-webpki-roots", "zlib-stock"] }
 twilight-http = { version = "0.16.0-rc.1", default-features = false, features = ["rustls-webpki-roots", "hickory"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "macros"] }
 twilight-util = { version = "0.16.0-rc.1", features = ["builder"] }
