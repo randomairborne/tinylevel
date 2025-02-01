@@ -11,7 +11,7 @@ twilight-util = { version = "0.16.0-rc.1", features = ["builder"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tracing-subscriber = { version = "0.3", features = ["json"] }
 tokio-util = { version = "0.7", features = ["rt"] }
-twilight-model = "0.16.0-rc.1"
+twilight-model = "0.16.0"
 valk-utils = "0.1"
 tracing = "0.1"
 thiserror = "2"
