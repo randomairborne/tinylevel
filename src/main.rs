@@ -26,7 +26,7 @@ use twilight_model::{
         command::{Command, CommandOption, CommandOptionType, CommandType},
         interaction::{
             application_command::{CommandData, CommandOptionValue},
-            InteractionData,
+            InteractionContextType, InteractionData,
         },
     },
     channel::{message::MessageFlags, Message},
@@ -153,7 +153,7 @@ async fn event_loop(state: &AppState, mut shard: Shard) {
         let event = match next {
             Ok(event) => event,
             Err(source) => {
-                if matches!(source.kind(), ReceiveMessageErrorType::WebSocket)
+                if matches!(source.kind(), ReceiveMessageErrorType::Reconnect)
                     && state.shutdown.load(Ordering::Acquire)
                 {
                     // If we have a gateway error and are shutting down
@@ -238,19 +238,19 @@ fn get_commands() -> Vec<Command> {
     [
         CommandBuilder::new(GET_PROGRESS_NAME_CTX, "", CommandType::Message)
             .default_member_permissions(Permissions::MODERATE_MEMBERS)
-            .dm_permission(false)
+            .contexts([InteractionContextType::Guild])
             .build(),
         CommandBuilder::new(GET_PROGRESS_NAME_CTX, "", CommandType::User)
             .default_member_permissions(Permissions::MODERATE_MEMBERS)
-            .dm_permission(false)
+            .contexts([InteractionContextType::Guild])
             .build(),
         CommandBuilder::new(RESET_PROGRESS_NAME_CTX, "", CommandType::Message)
             .default_member_permissions(Permissions::MODERATE_MEMBERS)
-            .dm_permission(false)
+            .contexts([InteractionContextType::Guild])
             .build(),
         CommandBuilder::new(RESET_PROGRESS_NAME_CTX, "", CommandType::User)
             .default_member_permissions(Permissions::MODERATE_MEMBERS)
-            .dm_permission(false)
+            .contexts([InteractionContextType::Guild])
             .build(),
         CommandBuilder::new(
             GET_PROGRESS_NAME_SLASH,
@@ -258,7 +258,7 @@ fn get_commands() -> Vec<Command> {
             CommandType::ChatInput,
         )
         .default_member_permissions(Permissions::MODERATE_MEMBERS)
-        .dm_permission(false)
+        .contexts([InteractionContextType::Guild])
         .option(target_argument.clone())
         .build(),
         CommandBuilder::new(
@@ -267,7 +267,7 @@ fn get_commands() -> Vec<Command> {
             CommandType::ChatInput,
         )
         .default_member_permissions(Permissions::MODERATE_MEMBERS)
-        .dm_permission(false)
+        .contexts([InteractionContextType::Guild])
         .option(target_argument)
         .build(),
     ]
