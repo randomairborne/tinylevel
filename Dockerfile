@@ -1,17 +1,15 @@
-ARG LLVMTARGETARCH
-FROM --platform=${BUILDPLATFORM} ghcr.io/randomairborne/cross-cargo:${LLVMTARGETARCH} AS builder
+FROM rust:alpine AS builder
 
-ARG LLVMTARGETARCH
+RUN apk add musl-dev
 
 WORKDIR /build
 
 COPY . .
 
-RUN cargo build --release --target ${LLVMTARGETARCH}-unknown-linux-musl
+RUN cargo build --release
 
 FROM scratch
-ARG LLVMTARGETARCH
 
-COPY --from=builder /build/target/${LLVMTARGETARCH}-unknown-linux-musl/release/tinylevel /usr/bin/tinylevel
+COPY --from=builder /build/target/release/tinylevel /usr/bin/tinylevel
 
 ENTRYPOINT ["/usr/bin/tinylevel"]
