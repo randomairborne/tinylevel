@@ -1,5 +1,10 @@
 # tinylevel
 
+> [!WARNING]
+> This project is no longer maintained. If you need it, still use it, or need help with it,
+> please join [my discord](https://valk.sh/discord) or
+> [email me](mailto:valk@randomairborne.dev).
+
 A stupidly simple role-granting discord bot.
 
 Stores data in sqlite, only needs a discord token and other basic config.
